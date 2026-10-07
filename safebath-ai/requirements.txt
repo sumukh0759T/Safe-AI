@@ -1,0 +1,13 @@
+tensorflow>=2.15
+scikit-learn
+numpy
+pandas
+librosa
+paho-mqtt
+fastapi
+uvicorn
+httpx
+pydantic
+requests
+joblib
+pytest

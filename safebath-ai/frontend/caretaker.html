@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#020617" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>SafeBath Caretaker</title>
+  <style>
+    body { margin: 0; background: #f0f4ff; }
+    #root:empty::after {
+      content: "connecting to SafeBath…";
+      color: #64748b;
+      font-family: system-ui, sans-serif;
+      display: block;
+      padding: 40px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    window.addEventListener("error", function (e) {
+      var d = document.getElementById("errbox");
+      if (!d) {
+        d = document.createElement("div");
+        d.id = "errbox";
+        d.style.cssText =
+          "position:fixed;bottom:0;left:0;right:0;background:#7f1d1d;" +
+          "color:#fecaca;font:12px monospace;padding:10px;z-index:9999;" +
+          "white-space:pre-wrap";
+        document.body.appendChild(d);
+      }
+      d.textContent = "JS error: " + e.message +
+        " @ " + (e.filename || "?") + ":" + e.lineno;
+    });
+  </script>
+  <script src="./dist/caretaker-bundle.js?v=2"></script>
+</body>
+</html>

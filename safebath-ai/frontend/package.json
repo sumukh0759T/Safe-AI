@@ -1,0 +1,20 @@
+{
+  "name": "safebath-dashboard",
+  "private": true,
+  "version": "1.0.0",
+  "description": "SafeBath AI dashboard - static bundle, no server framework needed",
+  "scripts": {
+    "build": "esbuild main.jsx --bundle --outfile=dist/bundle.js --jsx=automatic --minify && esbuild main_caretaker.jsx --bundle --outfile=dist/caretaker-bundle.js --jsx=automatic --minify",
+    "build:dashboard": "esbuild main.jsx --bundle --outfile=dist/bundle.js --jsx=automatic --minify",
+    "build:caretaker": "esbuild main_caretaker.jsx --bundle --outfile=dist/caretaker-bundle.js --jsx=automatic --minify",
+    "watch": "esbuild main.jsx --bundle --outfile=dist/bundle.js --jsx=automatic --watch",
+    "serve": "python -m http.server 8080"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}

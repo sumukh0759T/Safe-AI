@@ -1,0 +1,2 @@
+# local, never-committed network credentials (see firmware/set_wifi.ps1)
+*.local

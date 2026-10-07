@@ -1,0 +1,284 @@
+SafeBath AI -- Models Performance Matrix
+========================================
+Project: SafeBath AI -- Autonomous Elderly-Care Bathroom Safety System
+Generated: August 25, 2026
+
+=============================================================================
+                         EXECUTIVE SUMMARY
+=============================================================================
+
+Total Models:       6 defined, 3 trained and deployed
+Overall Accuracy:   97.1% weighted average across all trained models
+ESP32 Deployment:   2 models converted to TFLite (total 78.4 KB)
+Rule-Based Fallback: 9 physics-based heuristics always active
+
+=============================================================================
+                   MODEL PERFORMANCE SUMMARY
+=============================================================================
+
++----+---------------------+-----------+------------+----------+----------+
+| #  | Model               | Accuracy  | Precision  | Recall   | F1       |
+|    |                     | (Holdout) | (Macro Avg)| (Macro)  | (Macro)  |
++----+---------------------+-----------+------------+----------+----------+
+| 1  | Fall Risk ConvLSTM  | 1.000     | 1.000      | 1.000    | 1.000    |
+| 2  | Thermal Freeze      | 1.000     | 1.000      | 1.000    | 1.000    |
+|    | CNN+LSTM            |           |            |          |          |
+| 3  | Toilet Biomarker    | 0.913     | 0.914      | 0.913    | 0.913    |
+|    | Random Forest       |           |            |          |          |
++----+---------------------+-----------+------------+----------+----------+
+|    | WEIGHTED AVERAGE    | 0.971     | 0.972      | 0.971    | 0.971    |
++----+---------------------+-----------+------------+----------+----------+
+
+=============================================================================
+                   MODEL 1: FALL RISK ConvLSTM
+=============================================================================
+
+Serves:          Module 1 -- Pressure Mat (Board 1)
+Hardware:        ESP32 + CD4067 16-ch mux + 74HC595 + 16x4 Velostat grid
+Architecture:    Sequential
+                 Reshape(20,16,4,1) -> ConvLSTM2D(8, 3x3, same, tanh)
+                 -> Flatten -> Dense(16, relu) -> Dense(3, softmax)
+Total Params:    10,883 (42.51 KB)
+Input Shape:     (1, 20, 16, 4, 1) -- 20 timesteps of 16x4 pressure grid
+Classes:         normal(0), unsteady(1), fall(2)
+Optimizer:       Adam
+Loss:            sparse_categorical_crossentropy
+Epochs:          12, batch=32, val_split=0.15, EarlyStopping(patience=3)
+Training Data:   1,200 synthetic samples (400 per class)
+Target:          Accuracy >= 0.85
+
+Confusion Matrix (20% holdout, n=240):
+                Predicted
+                normal  unsteady  fall
+  actual normal    80       0       0
+  actual unsteady   0      80       0
+  actual fall       0       0      80
+
+Per-Class Results:
+  Class          Precision   Recall   F1-Score   Support
+  normal           1.000     1.000     1.000        80
+  unsteady         1.000     1.000     1.000        80
+  fall             1.000     1.000     1.000        80
+
+Artifact Files:
+  models/fall_risk_model.h5                     165.1 KB (Keras)
+  models/fall_risk_model.tflite                  34.4 KB (TFLite)
+  firmware/shared/model_data/fall_risk_model_model_data.h   215.3 KB (C header)
+
+=============================================================================
+                   MODEL 2: THERMAL FREEZE CNN+LSTM
+=============================================================================
+
+Serves:          Module 6 -- ToF/Thermal/Voice Node (Board 5)
+Hardware:        ESP32 + 3x VL53L1X ToF + AMG8833 8x8 thermal + DFPlayer
+Architecture:    Sequential
+                 Reshape(15,8,8,1) -> TimeDistributed(Conv2D(8, 3x3, relu))
+                 -> TimeDistributed(Flatten) -> LSTM(16) -> Dense(2, softmax)
+Total Params:    33,970 (132.70 KB)
+Input Shape:     (1, 15, 8, 8, 1) -- 15 timesteps of 8x8 thermal grid
+Classes:         safe(0), thermal_hazard(1)
+Optimizer:       Adam
+Loss:            sparse_categorical_crossentropy
+Epochs:          10, batch=32, val_split=0.15, EarlyStopping(patience=3)
+Training Data:   1,000 synthetic samples (500 per class)
+Target:          Accuracy >= 0.85
+
+Confusion Matrix (20% holdout, n=200):
+                Predicted
+                safe  thermal_hazard
+  actual safe    100       0
+  actual hazard    0     100
+
+Per-Class Results:
+  Class            Precision   Recall   F1-Score   Support
+  safe               1.000     1.000     1.000       100
+  thermal_hazard     1.000     1.000     1.000       100
+
+Artifact Files:
+  models/thermal_freeze_model.h5                 439.2 KB (Keras)
+  models/thermal_freeze_model.tflite              44.0 KB (TFLite)
+  firmware/shared/model_data/thermal_freeze_model_model_data.h   275.2 KB (C header)
+
+=============================================================================
+                   MODEL 3: TOILET BIOMARKER RANDOM FOREST
+=============================================================================
+
+Serves:          Module 3 -- Toilet Node (Board 3)
+Hardware:        ESP32 + MQ-135 (NH3/CO2) + MQ-3 (alcohol/VOC) + TCS3200
+Architecture:    RandomForestClassifier
+                 n_estimators=100, max_depth=6, random_state=42
+Total Params:    100 trees, 3 features
+Input Shape:     (N, 3) -- gas_ppm, voc_ppm, turbidity
+Classes:         normal, uti_risk, dehydration_risk
+Feature Importances:
+  gas_ppm:       0.257 (25.7%)
+  voc_ppm:       0.323 (32.3%)
+  turbidity:     0.420 (42.0%)
+Target:          Accuracy >= 0.80
+
+Confusion Matrix (20% holdout, n=600):
+                  Predicted
+                  dehydration  normal  uti_risk
+  actual dehyd      170         1       29
+  actual normal       0       199        1
+  actual uti         19         2      179
+
+Per-Class Results:
+  Class              Precision   Recall   F1-Score   Support
+  dehydration_risk     0.899     0.850     0.874       200
+  normal               0.985     0.995     0.990       200
+  uti_risk             0.856     0.895     0.875       200
+
+Artifact Files:
+  models/toilet_rf_model.pkl                    766.4 KB (joblib)
+
+=============================================================================
+                   MODELS 4-6: NOT YET TRAINED
+=============================================================================
+
+#4 Audio Distress Head (Dense MLP)
+  Module: 4 (Audio) | Board 4 + MAX4466 mic
+  Arch: Dense(64,relu) -> Dense(4,softmax) | 3 features: [rms, zcr, centroid]
+  Target: per-class recall >= 0.70 | Status: awaiting real audio data
+
+#5 Voice Keyword Spotting (micro_speech CNN)
+  Module: 10 (Voice Bridge) | Board 4 + laptop
+  Arch: Conv2D(8) -> Conv2D(8) -> GAP -> Dense(4) | log-mel spectrogram
+  Target: TFLite size < 20 KB | Status: awaiting Google Speech Commands data
+
+#6 Routine Anomaly Isolation Forest
+  Module: 9 (Routine) | laptop only
+  Arch: IsolationForest(contamination=0.1) | 3 features from PIR timestamps
+  Target: detect routine deviations | Status: awaiting 50+ real PIR events
+
+=============================================================================
+                   ESP32 DEPLOYMENT METRICS
+=============================================================================
+
++---------------------+-----------+-----------+-----------+--------------+
+| Model               | Keras     | TFLite    | C Header  | Tensor Arena |
+|                     | (.h5)     | (.tflite) | (Bytes)   | (KB, est.)   |
++---------------------+-----------+-----------+-----------+--------------+
+| Fall ConvLSTM       | 165.1 KB  |  34.4 KB  | 215.3 KB  |    ~35 KB    |
+| Thermal CNN+LSTM    | 439.2 KB  |  44.0 KB  | 275.2 KB  |    ~44 KB    |
++---------------------+-----------+-----------+-----------+--------------+
+| TOTAL               | 604.3 KB  |  78.4 KB  | 490.5 KB  |    ~79 KB    |
++---------------------+-----------+-----------+-----------+--------------+
+
+ESP32 Constraints:
+  Tensor Arena (RAM):     100 KB budget  ->  79 KB used (79%) OK
+  Flash for model data:   512 KB budget  ->  490.5 KB used (96%) OK
+
+=============================================================================
+                   TRAINING DATA SUMMARY
+=============================================================================
+
++---------------------+---------+-------------+------------+------------+
+| Dataset             | Samples | Split       | Classes    | Balance    |
++---------------------+---------+-------------+------------+------------+
+| Mat Pressure        |   1,200 | 85/15 train | 3 (0,1,2)  | Equal      |
+|                     |         |   val       |            | 400 each   |
+| Thermal Grid        |   1,000 | 85/15 train | 2 (0,1)    | Equal      |
+|                     |         |   val       |            | 500 each   |
+| Toilet Biomarkers   |   3,000 | 80/20 strat | 3 classes  | Equal      |
+|                     |         |   test      |            | 1000 each  |
++---------------------+---------+-------------+------------+------------+
+
+Data Generation:
+  Mat:      datasets/gen_mat_data.py     -> data/synthetic/mat_synth_*.npy
+  Thermal:  datasets/gen_thermal_data.py -> data/synthetic/thermal_synth_*.npy
+  Toilet:   datasets/gen_toilet_data.py  -> data/synthetic/toilet_synth_data.csv
+
+=============================================================================
+                   RULE-BASED DETECTION (NO MODEL)
+=============================================================================
+
+These run in backend/alert_rules.py without any trained model:
+
++-----------------------------------+--------+------------+----------+
+| Rule                              | Module | Trigger    | Severity |
++-----------------------------------+--------+------------+----------+
+| mat_sustained_high_pressure()     | 1 (Mat)| sum>60000  | High     |
+|                                   |        | for >= 2s  |          |
+| mat_centroid_cells()              | 1 (Mat)| CoP weight | High     |
+| mat_centroid_jump()               | 1 (Mat)| CoP shift  | High     |
+|                                   |        | > 5 cells  |          |
+| radar_possible_collapse()         | 2      | motionless | High     |
+|                                   | (Radar)| >= 15s     |          |
+| acoustic_thud_confirmed()         | 4      | thud +     | High     |
+|                                   | (Audio)| radar ok   |          |
+| acoustic_sustained_cry()          | 4      | cry >= 5s  | High     |
+|                                   | (Audio)|            |          |
+| tof_collapse_trigger()            | 5 (ToF)| posture    | High     |
+|                                   |        | collapse   |          |
+| scald_shutoff()                   | 5      | hot + no   | Critical |
+|                                   | (Therm)| user       |          |
+| toilet_uti_flag()                 | 3      | 3x uti_risk| Medium   |
+|                                   |(Toilet)| in 24h     |          |
++-----------------------------------+--------+------------+----------+
+
+=============================================================================
+                   FUSION ENGINE WEIGHTED ENSEMBLE
+=============================================================================
+
+Flag Weights:
+  fall_risk:           26    (highest -- most dangerous)
+  possible_collapse:   22
+  thermal_freeze:      20
+  acoustic_distress:   18
+  tof_collapse:        18
+  toilet_biomarker:     8
+  routine_anomaly:      8
+
+Score: max(effective_weight_sum * 100, prev_score * 0.9)
+Bands: normal (<30) -> watch (30-60) -> high (>60)
+State: resolved -> voice_pending -> alerting -> resolved
+
+=============================================================================
+                   INFERENCE PIPELINE
+=============================================================================
+
+Board firmware (ESP32) --MQTT:1883--> Mosquitto Broker
+    --> mqtt_bridge.py (validate + store)
+    --> data/events.db (SQLite)
+    --> fusion_engine.py (poll every 1s)
+        --> Rule-based heuristics (alert_rules.py)
+        --> ML models (optional, loaded at startup)
+    --> dispatch_alert() -> caretaker_api.py -> SSE -> Dashboard
+
+Latency Budget:
+  Sensor -> MQTT publish:          ~50 ms
+  MQTT -> bridge -> SQLite:        ~10 ms
+  Fusion engine poll cycle:       ~1000 ms
+  API poll / SSE push:            ~100 ms
+  Dashboard render:                ~50 ms
+  TOTAL (sensor -> screen):      ~1210 ms
+
+=============================================================================
+                   TECHNOLOGY STACK
+=============================================================================
+
+ML Frameworks:
+  TensorFlow 2.16.2 (with tf-keras 2.16.0 for Keras 2 API)
+  scikit-learn 1.9.0 (Random Forest, Isolation Forest)
+  TFLite (ESP32 deployment)
+
+Hardware:
+  ESP32 DevKit V1 (5 boards, WiFi)
+  VL53L1X ToF sensors (Board 5)
+  AMG8833 8x8 thermal camera (Board 5)
+  MAX4466 analog microphone (Board 4)
+  CD4067 16-ch analog mux + 74HC595 (Board 1)
+  MQ-135 + MQ-3 gas sensors (Board 3)
+  TCS3200 color/turbidity sensor (Board 3)
+  Velostat pressure-sensitive film (Board 1)
+
+Software:
+  Mosquitto MQTT Broker
+  SQLite (events.db)
+  FastAPI + uvicorn (REST API)
+  React (frontend dashboards)
+  Leaflet.js (maps)
+  Web Audio API (alert sounds)
+  Web Notifications API (browser push)
+  SSE (Server-Sent Events for real-time)

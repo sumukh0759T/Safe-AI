@@ -1,0 +1,12 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# stray runtime DB at repo root (artifacts of running tools without --db)
+*.db
+
+# OS junk
+.DS_Store
+Thumbs.db
