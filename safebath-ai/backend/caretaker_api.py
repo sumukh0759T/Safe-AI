@@ -20,9 +20,11 @@ from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from backend.db import DEFAULT_DB, get_conn, init_db
+from backend import emergency
+from backend import push_service
 
 DB_PATH = os.environ.get("SQLITE_PATH", DEFAULT_DB)
 
@@ -54,10 +56,12 @@ def _severity_from_flags(flags_csv: str, score: float) -> str:
 
 
 def _insert_alert(conn: sqlite3.Connection, ts: float, severity: str,
-                  trigger_name: str, message: str) -> int:
+                  trigger_name: str, message: str,
+                  event_id: Optional[str] = None) -> int:
     cur = conn.execute(
-        "INSERT INTO alerts(ts,severity,trigger_name,message) VALUES (?,?,?,?)",
-        (ts, severity, trigger_name, message))
+        "INSERT INTO alerts(ts,severity,trigger_name,message,event_id) "
+        "VALUES (?,?,?,?,?)",
+        (ts, severity, trigger_name, message, event_id))
     conn.commit()
     return cur.lastrowid
 
@@ -68,12 +72,12 @@ def get_alerts(limit: int = 50, include_acknowledged: bool = True):
     init_db(DB_PATH)
     if include_acknowledged:
         rows = conn.execute(
-            "SELECT id,ts,severity,trigger_name,message,active,"
+            "SELECT id,ts,severity,trigger_name,message,active,event_id,"
             "acknowledged_at,acknowledged_by FROM alerts "
             "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     else:
         rows = conn.execute(
-            "SELECT id,ts,severity,trigger_name,message,active,"
+            "SELECT id,ts,severity,trigger_name,message,active,event_id,"
             "acknowledged_at,acknowledged_by FROM alerts "
             "WHERE active=1 ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     return {"alerts": [dict(r) for r in rows]}
@@ -82,7 +86,7 @@ def get_alerts(limit: int = 50, include_acknowledged: bool = True):
 @caretaker_app.post("/ack/{alert_id}")
 def acknowledge(alert_id: int, by: str = "caretaker"):
     conn = get_conn(DB_PATH)
-    row = conn.execute("SELECT id,active FROM alerts WHERE id=?",
+    row = conn.execute("SELECT id,active,event_id FROM alerts WHERE id=?",
                        (alert_id,)).fetchone()
     if not row:
         raise HTTPException(404, "alert not found")
@@ -92,6 +96,85 @@ def acknowledge(alert_id: int, by: str = "caretaker"):
                  "acknowledged_by=? WHERE id=?",
                  (time.time(), by, alert_id))
     conn.commit()
+    # if this alert is the face of an emergency event, acknowledge that too
+    # (offline-local update + durable outbox ack for cloud sync)
+    if row["event_id"]:
+        try:
+            emergency.acknowledge(DB_PATH, row["event_id"], by=by)
+        except Exception as e:
+            print(f"[caretaker] ack sync failed for {row['event_id']}: {e}")
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# Emergency events (the truthful local source of truth for the caretaker UI)
+# --------------------------------------------------------------------------- #
+@caretaker_app.get("/emergencies")
+def get_emergencies(limit: int = 50, state: Optional[str] = None):
+    init_db(DB_PATH)
+    conn = get_conn(DB_PATH)
+    if state:
+        rows = conn.execute(
+            "SELECT * FROM emergency_events WHERE state=? "
+            "ORDER BY ts DESC LIMIT ?", (state, limit)).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM emergency_events ORDER BY ts DESC LIMIT ?",
+            (limit,)).fetchall()
+    out = [dict(r) for r in rows]
+    for e in out:
+        try:
+            e["evidence"] = json.loads(e.get("evidence") or "{}")
+        except (TypeError, ValueError):
+            e["evidence"] = {}
+    return {"emergencies": out}
+
+
+@caretaker_app.post("/emergencies/{event_id}/ack")
+def acknowledge_emergency(event_id: str, by: str = "caretaker"):
+    """Acknowledge an emergency event. This marks the *notification* handled;
+    it does NOT claim the physical emergency ended (resolution is the fusion
+    engine's separate decision). Local state updates instantly; the ack is
+    queued for cloud sync and push deliveries are marked acknowledged."""
+    ok = emergency.acknowledge(DB_PATH, event_id, by=by)
+    if not ok:
+        raise HTTPException(404, "emergency event not found")
+    try:
+        push_service.mark_delivery_acknowledged(DB_PATH, event_id)
+    except Exception as e:
+        print(f"[caretaker] delivery ack failed: {e}")
+    return {"ok": True, "event_id": event_id, "state": "acknowledged"}
+
+
+# --------------------------------------------------------------------------- #
+# Caregiver web-push (VAPID public key is served to the PWA so it can build
+# a subscription; the private key never leaves the server env).
+# --------------------------------------------------------------------------- #
+@caretaker_app.get("/push/vapid-public-key")
+def push_vapid_public_key():
+    keys = push_service.load_keys()
+    return {"public_key": keys.get("public_key", ""),
+            "configured": bool(keys)}
+
+
+@caretaker_app.post("/push/subscribe")
+async def push_subscribe(request: Request):
+    body = await request.json()
+    try:
+        sub_id = push_service.subscribe(
+            DB_PATH, body["endpoint"], body["keys"]["p256dh"],
+            body["keys"]["auth"])
+    except (KeyError, TypeError, ValueError) as e:
+        raise HTTPException(400, f"invalid subscription body: {e}")
+    return {"ok": True, "subscription_id": sub_id}
+
+
+@caretaker_app.post("/push/unsubscribe")
+async def push_unsubscribe(request: Request):
+    body = await request.json()
+    endpoint = body.get("endpoint")
+    if endpoint:
+        push_service.unsubscribe(DB_PATH, endpoint)
     return {"ok": True}
 
 
@@ -180,14 +263,30 @@ async def event_stream():
                                       "X-Accel-Buffering": "no"})
 
 
-def dispatch_alert(result: dict, conn: Optional[sqlite3.Connection] = None):
+def dispatch_alert(result: dict, conn: Optional[sqlite3.Connection] = None,
+                   db_path: Optional[str] = None) -> Optional[str]:
     """Called by fusion_engine main() after each tick with actions.
-    Creates alert rows for escalation actions and high-severity flags."""
+
+    For every genuine escalation ('escalate_alert') it:
+      1. creates ONE durable emergency_events row (idempotent — sensor
+         retries / repeated dispatches within the dedup window never
+         duplicate it; repeat escalation only when explicitly configured)
+      2. fires the LOCAL alarm immediately (offline-first, never waits for
+         cloud)
+      3. enqueues the event into the outbox for async Supabase sync
+      4. queues caregiver web-push deliveries
+      5. creates the caretaker alert row linked to the emergency event
+
+    Returns the emergency event_id when a NEW emergency was created,
+    else None (duplicate retry or no emergency this tick).
+    """
     if not result:
-        return
+        return None
     own_conn = conn is None
+    db_path = db_path or DB_PATH
     if own_conn:
-        conn = get_conn(DB_PATH)
+        conn = get_conn(db_path)
+    event_ids: set = set()
     try:
         ts = result.get("ts", time.time())
         score = result.get("score", 0)
@@ -195,18 +294,47 @@ def dispatch_alert(result: dict, conn: Optional[sqlite3.Connection] = None):
         actions = result.get("actions", [])
         state = result.get("state", "resolved")
         active_flags = [k for k, v in flags.items() if v]
+        sev = _severity_from_flags(",".join(active_flags), score)
+        seen: set = set()
 
-        # create alert for every escalation or voice triage request action
         for a in actions:
-            if a["action"] in ("escalate_alert", "request_voice_triage"):
-                sev = _severity_from_flags(",".join(active_flags), score)
-                trigger = a.get("reason") or a.get("prompt") or active_flags[0] if active_flags else "unknown"
-                msg = _TRIGGER_MSG.get(trigger, f"Alert: {trigger}")
-                _insert_alert(conn, ts, sev, trigger, msg)
+            if a["action"] == "escalate_alert":
+                trigger = a.get("reason") or (active_flags[0] if active_flags else "unknown")
+                if trigger in seen:
+                    continue                        # one alert per trigger/tick
+                seen.add(trigger)
+                emg, created = emergency.create_if_new(db_path, result,
+                                                       conn=conn)
+                if emg is None:
+                    continue
+                eid = emg["event_id"]
+                event_ids.add(eid)
+                if not created:
+                    # duplicate sensor retry / repeated dispatch for the same
+                    # unresolved emergency: never re-alarm or re-notify.
+                    continue
+                alert_id = _insert_alert(conn, ts, emg["severity"], trigger,
+                                         emg["message"], event_id=eid)
+                # link both sides so ack/alert stay in sync
+                conn.execute("UPDATE emergency_events SET alert_id=? "
+                             "WHERE event_id=?", (alert_id, eid))
+                conn.commit()
+                emergency.fire_local_alarm(db_path, emg)
+                emergency.queue_notifications(db_path, emg)
+            elif a["action"] == "request_voice_triage":
+                trigger = a.get("prompt", "are_you_ok")
+                if trigger in seen:
+                    continue
+                seen.add(trigger)
+                msg = _TRIGGER_MSG.get(trigger, f"Voice check: {trigger}")
+                _insert_alert(conn, ts, sev, trigger, msg, event_id=None)
 
-        # create alerts when state is non-resolved AND any flags are active
-        # (catches the initial trigger that sets voice_pending without an action)
-        if state in ("voice_pending", "alerting") and active_flags:
+        # voice_pending / alerting states without an explicit escalation action
+        # still deserve an alert the first time they appear (e.g. ToF collapse
+        # that set voice_pending without an action row). Dedupes against alerts
+        # created in the same tick above via event_ids.
+        if state in ("voice_pending", "alerting") and active_flags and \
+                not event_ids:
             existing = conn.execute(
                 "SELECT id FROM alerts WHERE ts > ? AND ts < ?",
                 (ts - 3.0, ts + 0.5)).fetchone()
@@ -214,8 +342,9 @@ def dispatch_alert(result: dict, conn: Optional[sqlite3.Connection] = None):
                 trigger = active_flags[0]
                 msg = _TRIGGER_MSG.get(trigger, f"Risk elevated: {trigger}")
                 _insert_alert(conn, ts, _severity_from_flags(
-                    ",".join(active_flags), score), trigger, msg)
+                    ",".join(active_flags), score), trigger, msg, event_id=None)
 
+        return next(iter(event_ids)) if event_ids else None
     finally:
         if own_conn:
             conn.close()

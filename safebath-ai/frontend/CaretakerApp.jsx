@@ -19,7 +19,18 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
-const API_BASE = "http://localhost:8000/caretaker";
+/* API base is configurable so the same static bundle works on the Pi, a phone
+ * on the LAN, or a hosted dashboard. Override with window.SAFEBATH_API_BASE or
+ * <meta name="safebath-api-base">. Defaults to the local edge server. */
+function resolveApiBase() {
+  if (typeof window !== "undefined") {
+    if (window.SAFEBATH_API_BASE) return String(window.SAFEBATH_API_BASE).replace(/\/$/, "");
+    const m = document.querySelector('meta[name="safebath-api-base"]');
+    if (m && m.content) return m.content.replace(/\/$/, "");
+  }
+  return "http://localhost:8000";
+}
+const API_BASE = `${resolveApiBase()}/caretaker`;
 const POLL_MS = 5000;
 
 /* Leaflet CSS + JS loaded from CDN once */
@@ -194,6 +205,133 @@ function pushNotify(title, body, severity) {
     });
     setTimeout(() => n.close(), 15000);
   } catch {}
+}
+
+/* ------------------------------------------------------------------ */
+/*  Web Push subscription (browser push, works when the tab is closed) */
+/* ------------------------------------------------------------------ */
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+async function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return null;
+  try {
+    return await navigator.serviceWorker.register("./sw.js");
+  } catch {
+    return null;
+  }
+}
+
+/* Returns {state} where state ∈ subscribed | denied | unsupported |
+ * not-configured | error. The subscription itself is POSTed to the edge server,
+ * which stores it for server-side push (pywebpush) on new emergencies. */
+async function getPushState() {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) return "unsupported";
+  if (("Notification" in window) && Notification.permission === "denied") return "denied";
+  try {
+    const reg = await navigator.serviceWorker.getRegistration();
+    if (!reg) return "default";
+    const sub = await reg.pushManager.getSubscription();
+    return sub ? "subscribed" : "default";
+  } catch {
+    return "unsupported";
+  }
+}
+
+async function enablePush() {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    return { state: "unsupported" };
+  }
+  const reg = await registerServiceWorker();
+  if (!reg) return { state: "unsupported" };
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") return { state: "denied" };
+    const r = await fetch(`${API_BASE}/push/vapid-public-key`);
+    const info = await r.json();
+    if (!info.configured || !info.public_key) return { state: "not-configured" };
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(info.public_key),
+    });
+    await fetch(`${API_BASE}/push/subscribe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(sub.toJSON()),
+    });
+    return { state: "subscribed", subscription: sub };
+  } catch {
+    return { state: "error" };
+  }
+}
+
+async function disablePush() {
+  try {
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = reg && (await reg.pushManager.getSubscription());
+    if (sub) {
+      const endpoint = sub.endpoint;
+      await sub.unsubscribe();
+      await fetch(`${API_BASE}/push/unsubscribe`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ endpoint }),
+      });
+    }
+    return "default";
+  } catch {
+    return "error";
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Acknowledgement sync queue (offline-first)                         */
+/*  Acks are applied locally first; if the POST fails they are queued   */
+/*  in localStorage and replayed when the edge server is reachable.     */
+/* ------------------------------------------------------------------ */
+const ACK_KEY = "safebath_pending_acks";
+
+function loadAcks() {
+  try { return JSON.parse(localStorage.getItem(ACK_KEY) || "[]"); } catch { return []; }
+}
+function saveAcks(list) {
+  try { localStorage.setItem(ACK_KEY, JSON.stringify(list)); } catch {}
+}
+function queueAck(kind, id, by) {
+  const list = loadAcks().filter((a) => !(a.kind === kind && a.id === id));
+  list.push({ kind, id, by: by || "caretaker", ts: Date.now() / 1000 });
+  saveAcks(list);
+  return list.length;
+}
+async function postAck(kind, id, by) {
+  const by2 = encodeURIComponent(by || "caretaker");
+  const url = kind === "emergency"
+    ? `${API_BASE}/emergencies/${encodeURIComponent(id)}/ack?by=${by2}`
+    : `${API_BASE}/ack/${id}?by=${by2}`;
+  const r = await fetch(url, { method: "POST" });
+  // 404/409 mean the ack is moot; stop retrying but keep the local state.
+  return r.ok || r.status === 404 || r.status === 409;
+}
+async function flushAcks() {
+  const list = loadAcks();
+  if (!list.length) return 0;
+  const remaining = [];
+  for (const a of list) {
+    try {
+      const done = await postAck(a.kind, a.id, a.by);
+      if (!done) remaining.push(a);
+    } catch {
+      remaining.push(a);
+    }
+  }
+  saveAcks(remaining);
+  return remaining.length;
 }
 
 /* ------------------------------------------------------------------ */
@@ -602,19 +740,97 @@ function AlertCard({ alert, onAck }) {
   );
 }
 
+/* Emergency event card — the durable, offline-first record (emergency_events).
+ * Distinct from transient alerts: acknowledging marks the *notification*
+ * handled, not that the physical emergency ended. */
+function EmergencyCard({ event, onAck }) {
+  const sev = event.severity || "watch";
+  const color = sev === "high" || sev === "critical" ? "#dc2626"
+    : sev === "watch" ? "#f59e0b" : "#0ea5e9";
+  const acknowledged = event.state === "acknowledged";
+  const label = TRIGGER_LABELS[event.trigger_name] || event.trigger_name || "Emergency";
+  return (
+    <div style={{
+      background: "#fff", borderRadius: 16, padding: "18px 20px",
+      marginBottom: 16, boxShadow: "0 4px 24px rgba(0,0,0,0.08)",
+      borderLeft: `5px solid ${color}`,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+        <span style={{ fontSize: 11, fontWeight: 800, color,
+          textTransform: "uppercase", letterSpacing: 0.5 }}>
+          {sev}
+        </span>
+        <span style={{ fontSize: 11, color: "#94a3b8", marginLeft: "auto" }}>
+          {timeAgo(event.ts)}
+        </span>
+      </div>
+      <div style={{ fontSize: 15, fontWeight: 700, color: "#1a3760", marginBottom: 4 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 13, color: "#475569", marginBottom: 10 }}>
+        {event.message}
+        {event.score != null && ` · risk ${Math.round(event.score)}`}
+      </div>
+      {acknowledged ? (
+        <div style={{ fontSize: 11, color: "#64748b" }}>
+          ✓ Notification acknowledged by {event.ack_by || "caretaker"}{" "}
+          {event.ack_ts ? timeAgo(event.ack_ts) : ""}
+        </div>
+      ) : (
+        <button onClick={() => onAck(event.event_id)} style={{
+          background: color, color: "#fff", border: "none", borderRadius: 10,
+          padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer",
+          width: "100%",
+        }}>
+          Acknowledge Emergency
+        </button>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /*  Main App                                                           */
 /* ------------------------------------------------------------------ */
 export default function CaretakerApp() {
   const [status, setStatus] = useState(null);
   const [alerts, setAlerts] = useState([]);
+  const [emergencies, setEmergencies] = useState([]);
   const [connected, setConnected] = useState(false);
   const [lastAlertId, setLastAlertId] = useState(0);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [notificationRequested, setNotificationRequested] = useState(false);
+  const [pushState, setPushState] = useState("unsupported");
+  const [pendingAcks, setPendingAcks] = useState(() => loadAcks().length);
   const { startAlarm, stopAlarm } = useAlarm();
   const prevScoreRef = useRef(0);
   const esRef = useRef(null);
+
+  // register the PWA service worker (enables push + offline app shell) and
+  // reflect the current push subscription state in the header button.
+  useEffect(() => {
+    registerServiceWorker();
+    let active = true;
+    (async () => {
+      const s = await getPushState();
+      if (active) setPushState(s);
+    })();
+    return () => { active = false; };
+  }, []);
+
+  // replay any acknowledgements queued while offline
+  const syncAcks = useCallback(async () => {
+    try {
+      const remaining = await flushAcks();
+      setPendingAcks(remaining);
+    } catch {}
+  }, []);
+  useEffect(() => {
+    syncAcks();
+    const id = setInterval(syncAcks, 15000);
+    window.addEventListener("online", syncAcks);
+    return () => { clearInterval(id); window.removeEventListener("online", syncAcks); };
+  }, [syncAcks]);
 
   // request notification permission on user interaction
   const requestNotifications = useCallback(() => {
@@ -673,8 +889,8 @@ export default function CaretakerApp() {
     };
   }, [soundEnabled, startAlarm, lastAlertId]);
 
-  // fetch alert list
-  const fetchAlerts = useCallback(async () => {
+  // fetch alert list + emergency events (the offline-first source of truth)
+  const fetchData = useCallback(async () => {
     try {
       const r = await fetch(`${API_BASE}/alerts?limit=30`);
       if (r.ok) {
@@ -682,13 +898,20 @@ export default function CaretakerApp() {
         setAlerts(d.alerts || []);
       }
     } catch {}
+    try {
+      const r = await fetch(`${API_BASE}/emergencies?limit=20`);
+      if (r.ok) {
+        const d = await r.json();
+        setEmergencies(d.emergencies || []);
+      }
+    } catch {}
   }, []);
 
   useEffect(() => {
-    fetchAlerts();
-    const id = setInterval(fetchAlerts, POLL_MS);
+    fetchData();
+    const id = setInterval(fetchData, POLL_MS);
     return () => clearInterval(id);
-  }, [fetchAlerts]);
+  }, [fetchData]);
 
   // SSE stream for instant push
   useEffect(() => {
@@ -732,30 +955,58 @@ export default function CaretakerApp() {
     };
   }, [soundEnabled, startAlarm]);
 
-  const handleAck = useCallback(
-    async (id) => {
-      try {
-        await fetch(`${API_BASE}/ack/${id}`, { method: "POST" });
-        setAlerts((prev) =>
-          prev.map((a) =>
-            a.id === id
-              ? {
-                  ...a,
-                  active: 0,
-                  acknowledged_by: "caretaker",
-                  acknowledged_at: Date.now() / 1000,
-                }
-              : a
-          )
-        );
-      } catch {}
-    },
-    []
-  );
+  /* Acknowledge locally first, then try the server. If the edge server is
+   * unreachable the ack is queued and replayed later (offline-first). */
+  const handleAck = useCallback(async (id) => {
+    setAlerts((prev) =>
+      prev.map((a) =>
+        a.id === id
+          ? { ...a, active: 0, acknowledged_by: "caretaker",
+              acknowledged_at: Date.now() / 1000 }
+          : a
+      )
+    );
+    try {
+      const done = await postAck("alert", id, "caretaker");
+      if (!done) setPendingAcks(queueAck("alert", id, "caretaker"));
+    } catch {
+      setPendingAcks(queueAck("alert", id, "caretaker"));
+    }
+  }, []);
+
+  const handleEmergencyAck = useCallback(async (eventId) => {
+    setEmergencies((prev) =>
+      prev.map((e) =>
+        e.event_id === eventId
+          ? { ...e, state: "acknowledged",
+              acknowledged_by: "caretaker", acknowledged_at: Date.now() / 1000 }
+          : e
+      )
+    );
+    try {
+      const done = await postAck("emergency", eventId, "caretaker");
+      if (!done) setPendingAcks(queueAck("emergency", eventId, "caretaker"));
+    } catch {
+      setPendingAcks(queueAck("emergency", eventId, "caretaker"));
+    }
+  }, []);
+
+  const togglePush = useCallback(async () => {
+    if (pushState === "subscribed") {
+      await disablePush();
+      setPushState("default");
+      return;
+    }
+    const res = await enablePush();
+    setPushState(res.state === "subscribed" ? "subscribed" : res.state);
+  }, [pushState]);
 
   const isDanger =
     status?.state === "alerting" || status?.state === "voice_pending";
   const activeAlerts = alerts.filter((a) => a.active);
+  const activeEmergencies = emergencies.filter(
+    (e) => e.state !== "resolved" && e.state !== "acknowledged"
+  );
 
   return (
     <div
@@ -814,6 +1065,32 @@ export default function CaretakerApp() {
           }}
         >
           <button
+            onClick={togglePush}
+            disabled={["unsupported", "denied", "not-configured"].includes(pushState)}
+            style={{
+              background: pushState === "subscribed"
+                ? "rgba(74,222,128,0.35)" : "rgba(255,255,255,0.15)",
+              border: "none",
+              color: "#fff",
+              fontSize: 16,
+              cursor: ["unsupported", "denied", "not-configured"].includes(pushState)
+                ? "not-allowed" : "pointer",
+              opacity: ["unsupported", "denied", "not-configured"].includes(pushState)
+                ? 0.5 : 1,
+              padding: "6px 10px",
+              borderRadius: 8,
+            }}
+            title={
+              pushState === "subscribed" ? "Push notifications on (tap to disable)"
+                : pushState === "denied" ? "Push blocked in browser settings"
+                : pushState === "not-configured" ? "Server push not configured (VAPID keys missing)"
+                : pushState === "unsupported" ? "Push not supported on this device"
+                : "Enable push notifications"
+            }
+          >
+            {pushState === "subscribed" ? "🔔" : "🔕"}
+          </button>
+          <button
             onClick={() => {
               requestNotifications();
               if (soundEnabled) stopAlarm();
@@ -844,6 +1121,24 @@ export default function CaretakerApp() {
 
       {/* Content container */}
       <div style={{ padding: "20px 16px", maxWidth: 480, margin: "0 auto" }}>
+        {pendingAcks > 0 && (
+          <div
+            style={{
+              background: "#fef3c7",
+              color: "#92400e",
+              border: "1px solid #fcd34d",
+              borderRadius: 12,
+              padding: "10px 14px",
+              marginBottom: 16,
+              fontSize: 12,
+              fontWeight: 600,
+            }}
+          >
+            ⏳ {pendingAcks} acknowledgement{pendingAcks > 1 ? "s" : ""} queued
+            offline — they'll sync automatically when the edge server is reachable.
+          </div>
+        )}
+
         {/* Danger SOS banner */}
         {isDanger && (
           <div
@@ -988,6 +1283,31 @@ export default function CaretakerApp() {
 
         {/* Location Map */}
         <LocationMap isDanger={isDanger} />
+
+        {/* Emergencies — durable local source of truth */}
+        {activeEmergencies.length > 0 && (
+          <div style={{ marginBottom: 20 }}>
+            <div
+              style={{
+                fontSize: 14,
+                fontWeight: 800,
+                color: "#dc2626",
+                textTransform: "uppercase",
+                letterSpacing: 1,
+                marginBottom: 12,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+              }}
+            >
+              <StatusDot color="#dc2626" pulse />
+              Active Emergencies ({activeEmergencies.length})
+            </div>
+            {activeEmergencies.map((e) => (
+              <EmergencyCard key={e.event_id} event={e} onAck={handleEmergencyAck} />
+            ))}
+          </div>
+        )}
 
         {/* Active alerts */}
         {activeAlerts.length > 0 && (

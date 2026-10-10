@@ -1,6 +1,6 @@
 /*
  * SafeBath AI — Board 2: Presence/Motion Radar (DFRobot C4001)  [v3 self-contained]
- * ESP32 + DFRobot C4001 UART + MQTT
+ * ESP32 + DFRobot C4001 UART + HTTP
  *
  * v3 changes (why): The DFRobot library's sensorStop()/config path contains a
  * silent infinite `while(1)` that never returns unless the sensor literally
@@ -13,7 +13,7 @@
  *   - Report frames ($DFDMD speed-mode / $DFHPD presence-mode) are parsed
  *     with the exact same field mapping the official library uses.
  *   - If the sensor never answers, this node keeps publishing safe defaults
- *     over MQTT forever and retries the handshake periodically.
+ *     over HTTP forever and retries the handshake periodically.
  *
  * Wiring:
  *   C4001 TX  -> ESP32 GPIO16 (RX2)
@@ -21,26 +21,28 @@
  *   C4001 GND -> ESP32 GND
  *   C4001 VIN -> 5 V supply appropriate for the module
  *
- * MQTT topic : sensor/radar/status
- * Payload    : {"presence":true,"motion":false,"stillness_ms":1234,
- *               "possible_collapse":false}
+ * HTTP endpoint : POST /api/v1/telemetry
+ * Payload       : {"presence":true,"motion":false,"stillness_ms":1234,
+ *                  "possible_collapse":false}
  */
 
 #include <WiFi.h>
-#include <PubSubClient.h>
+#include "../common/SafeBathNode.h"
 
 // ============================================================
-// WiFi / MQTT
+// WiFi / HTTP
 // ============================================================
 
+const char* device_id   = "radar-01";       // must match SAFEBATH_DEVICES
 const char* ssid        = "YOUR_ROUTER_SSID";
 const char* password    = "YOUR_ROUTER_PASSWORD";
-const char* mqtt_server = "192.168.1.20";   // laptop IP from step 0
+const char* server_host = "192.168.1.50";   // RPi IP running the edge API
+const uint16_t server_port = 8000;
+const char* node_token  = "";               // optional; matches device token
 
-WiFiClient espClient;
-PubSubClient client(espClient);
+safebath::Node node(device_id, "radar", "1.0.0");
 
-// true = Serial output only, no MQTT
+// true = Serial output only, no HTTP
 #define DEBUG_SERIAL_ONLY false
 
 // ============================================================
@@ -87,46 +89,9 @@ TaskHandle_t sensorTaskHandle = nullptr;
 // WiFi
 // ============================================================
 
-void setup_wifi() {
+// WiFi bring-up is handled by safebath::Node::begin() in setup().
 
-  Serial.println();
-  Serial.print("Connecting to WiFi: ");
-  Serial.println(ssid);
-
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println();
-  Serial.println("WiFi connected!");
-
-  Serial.print("ESP32 IP: ");
-  Serial.println(WiFi.localIP());
-}
-
-// ============================================================
-// MQTT
-// ============================================================
-
-void reconnectMQTT() {
-
-  while (!client.connected()) {
-
-    Serial.print("Connecting to MQTT...");
-
-    if (client.connect("RadarNode2")) {
-      Serial.println("connected");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" retrying...");
-      delay(1000);
-    }
-  }
-}
+// Publishing is handled by safebath::Node (HTTP) in loop().
 
 // ============================================================
 // Raw C4001 helpers — every operation time-bounded
@@ -384,8 +349,7 @@ void setup() {
   if (!DEBUG_SERIAL_ONLY) {
 
     // Network FIRST — never hostage to the sensor
-    setup_wifi();
-    client.setServer(mqtt_server, 1883);
+    node.begin(ssid, password, server_host, server_port, node_token);
     Serial.println("[main] network stack ready");
   }
 
@@ -405,7 +369,7 @@ void setup() {
 }
 
 // ============================================================
-// LOOP — WiFi/MQTT + publishing only (core 1)
+// LOOP — HTTP publishing only (core 1)
 // ============================================================
 
 void publishRadar(bool presence, bool motion,
@@ -418,23 +382,13 @@ void publishRadar(bool presence, bool motion,
     ",\"possible_collapse\":" + (collapse  ? "true" : "false") +
     "}";
 
-  if (client.publish("sensor/radar/status", payload.c_str())) {
-    Serial.print("MQTT -> ");
-    Serial.println(payload);
-  } else {
-    Serial.println("MQTT publish failed");
-  }
+  int code = 0;
+  bool ok = node.telemetry(payload.c_str(), &code);
+  Serial.printf("HTTP %d -> %s\n", code, payload.c_str());
+  (void)ok;
 }
 
 void loop() {
-
-  if (!DEBUG_SERIAL_ONLY) {
-
-    if (!client.connected()) {
-      reconnectMQTT();
-    }
-    client.loop();
-  }
 
   static unsigned long lastPublish = 0;
 

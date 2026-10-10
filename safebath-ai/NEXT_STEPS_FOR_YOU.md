@@ -7,28 +7,28 @@ a concrete "done looks like".
 
 ---
 
-## 0. One-time network + broker setup (Network Guide Section 2.2)
+## 0. One-time network setup (Network Guide Section 2.2)
 
 - [ ] Dedicated router / phone hotspot SSID + password chosen (not venue WiFi).
-- [ ] Laptop connected; note its IP: `ipconfig` → e.g. `192.168.1.20`.
+- [ ] Raspberry Pi (the edge server) joined to that network; note its IP:
+      `hostname -I` → e.g. `192.168.1.50`. This value is `server_host`.
 - [ ] Reserve that IP on the router (DHCP reservation) so it never changes.
-- [ ] Install Mosquitto: https://mosquitto.org/download/ (Windows: MSI, tick
-      "service"). Start it with a config allowing LAN listeners:
-      `mosquitto -v` in a terminal — you should see it listening on 1883.
-      Done looks like: `mosquitto_sub -h localhost -t "#" -v` prints nothing
-      but stays running without error.
+- [ ] Sanity check from another device once the stack is up (step 3):
+      `curl http://192.168.1.50:8000/api/v1/health` → `{"status":"ok"}`.
+
+> No MQTT broker is needed. Boards POST straight to the Pi over HTTP.
 
 ## 1. Point all firmware at your network (Section 2.3)
 
 In every `firmware/*/*.ino`, edit only these three lines:
 
 ```cpp
-const char* ssid = "YOUR_ROUTER_SSID";
-const char* password = "YOUR_ROUTER_PASSWORD";
-const char* mqtt_server = "192.168.1.20";   // laptop IP from step 0
+const char* ssid        = "YOUR_ROUTER_SSID";
+const char* password    = "YOUR_ROUTER_PASSWORD";
+const char* server_host = "192.168.1.50";   // RPi edge IP from step 0
 ```
 
-Nothing else changes per deployment — that is the point of the MQTT contract.
+Nothing else changes per deployment — that is the point of the HTTP contract.
 
 Or do all five files in one command (repo ships `firmware/set_wifi.ps1`):
 
@@ -36,8 +36,8 @@ Or do all five files in one command (repo ships `firmware/set_wifi.ps1`):
 # read credentials from firmware/wifi_credentials.local (git-ignored)...
 powershell -ExecutionPolicy Bypass -File firmware\set_wifi.ps1
 # ...or pass them directly:
-powershell -ExecutionPolicy Bypass -File firmware\set_wifi.ps1 -Ssid ONE `
-    -Password 'your_router_password' -MqttServer 192.168.1.20
+powershell -ExecutionPolicy Bypass -File firmware\set_wifi.ps1 -Ssid MyWiFi `
+    -Password 'your_router_password' -ServerHost 192.168.1.50
 ```
 
 The `.ino` files in git contain placeholders only — real credentials live in
@@ -56,8 +56,8 @@ do Step 1, then flip back.
       `mat min= max= sum= peak@r,c pir=` must show ONLY that cell's region jump.
       If two cells move together → row/column short — fix Velostat wiring before
       anything else. Then flip DEBUG flag off.
-- [ ] Step 2: `mosquitto_sub -t "sensor/mat/#" -v` shows 64-int CSV @10 Hz +
-      PIR events when you wave at the sensor.
+- [ ] Step 2: `curl http://<rpi>:8000/api/latest` (or the edge log) shows 64-int
+      values @10 Hz + PIR events when you wave at the sensor.
 - [ ] Step 3: rows appear in `data/events.db`; `/api/latest` mat card updates.
 - [ ] Step 4: dashboard Board-1 heatmap animates a footprint; CoP trail follows
       your steps.
@@ -69,13 +69,13 @@ do Step 1, then flip back.
 ### Board 2 — Radar (`radar_node.ino`)
 - [ ] Serial: walk in/out → presence/motion flip; stand still 2 min →
       `possible_collapse` flips true at ~120 s.
-- [ ] MQTT: `sensor/radar/status` @2 Hz; dashboard Board-2 pills update.
+- [ ] HTTP: radar telemetry @2 Hz reaches the Pi; dashboard Board-2 pills update.
 - [ ] Danger chain: stand perfectly still >120 s → voice gate → escalation.
 
 ### Board 3 — Toilet (`toilet_node.ino`)
 - [ ] Serial: breathe on MQ-135/MQ-3 → gas/voc rise; hold white paper then
       yellow-ish liquid sample over TCS3200 → turbidity proxy moves.
-- [ ] MQTT: `sensor/toilet/reading` every 2 s, no temp_c field.
+- [ ] HTTP: toilet telemetry every 2 s, no temp_c field.
 - [ ] Dashboard Board-3 bars update. NOTE: toilet flags are Medium severity by
       design — they will NOT page anyone (Master Guide §7/§8).
 
@@ -83,10 +83,15 @@ do Step 1, then flip back.
 - [ ] Serial: clap → impact_thud; pour water nearby → water; speak loudly →
       speech_or_cry; quiet room → silence. Three scenarios, three labels,
       reliably, before proceeding.
-- [ ] MQTT: `{"label":..., "energy":...}` ~5 Hz on `sensor/audio/event`.
-- [ ] Cross-board check (Phase E pair): publish
-      `mosquitto_pub -t voice/trigger -m '{"prompt":"are_you_ok"}'`
-      → within 8 s you should see `voice/reply` arrive (speak/shout/stay silent).
+- [ ] HTTP: `{"label":..., "energy":...}` ~5 Hz reaches the audio telemetry feed.
+- [ ] Cross-board check (Phase E pair): POST a manual trigger —
+      ```
+      curl -X POST http://<rpi>:8000/api/v1/event \
+        -H 'Content-Type: application/json' \
+        -d '{"contract_version":1,"device_id":"tof-01","module":"tof","firmware_version":"manual","boot_id":"deadbeef","sequence":1,"device_uptime_ms":0,"timestamp":0.0,"message_type":"event","sensor_status":"ok","payload":{"prompt":"are_you_ok"}}'
+      ```
+      → within 8 s Board 4 claims it (`GET /api/v1/voice/pending`) and POSTs a
+      reply event (speak/shout/stay silent).
 
 ### Board 5 — ToF/Thermal/Voice (`tof_thermal_voice_node.ino`)
 - [ ] Serial: distinct addresses 0x30/0x31/0x32 at boot; hand <30 cm over all
@@ -94,33 +99,34 @@ do Step 1, then flip back.
 - [ ] Bucket-and-tube rig ONLY (never real plumbing): warm water flow >
       ~50 pulses → relay clicks OFF, payload shows unattended_hot_fill=true.
       Power-cycle afterwards → relay back OPEN (default-safe).
-- [ ] Publish a manual `voice/trigger` → DFPlayer plays track 1 through the
+- [ ] POST a manual voice trigger (curl in Board 4 above) → within ~1 s Board 5
+      claims it (`role=play`) and the DFPlayer plays track 1 through the
       amplifier clearly. Record/deploy that prompt clip onto the SD card first.
 
 ---
 
 ## 3. Phase F — full integration checklist (Network Guide Section 2.5)
 
-With all 5 boards powered:
+With all 5 boards powered and pointed at the Pi:
 
-- [ ] `mosquitto -v` shows 5 client connections (MatNode1 … TofThermalVoiceNode5).
-- [ ] `mosquitto_sub -t "#" -v`: interleaved traffic from all namespaces; no
-      board dominating or silent.
-- [ ] On the laptop run the stack:
-      ```
-      python backend/mqtt_bridge.py          # terminal 1
-      python backend/fusion_engine.py        # terminal 2
-      uvicorn backend.api_server:app --port 8000   # terminal 3
-      ```
-      No `[bridge] REJECTED` lines scrolling (if any: that board's payload
-      drifted from the contract — tell me which topic).
+- [ ] All three edge services running on the Pi:
+      `systemctl status safebath safebath-fusion safebath-worker`
+      (fresh Pi: `deployment/raspberry_pi/install.sh`).
+- [ ] `curl http://localhost:8000/api/v1/devices` lists all five device_ids
+      (mat-01, radar-01, toilet-01, audio-01, tof-01).
+- [ ] `curl http://localhost:8000/api/latest`: interleaved traffic from every
+      module; no board dominating or silent. Rejected payloads show up loudly in
+      `journalctl -u safebath -f` (that board drifted from the contract — tell me
+      which one).
 - [ ] Stop the mock publisher if it was running (`mock_publisher.py`) — real
       data replaces simulated data with zero code changes.
 - [ ] Dashboard Live mode: all module cards show REAL values, heatmap animates
       from the actual Velostat scan, event log fills.
 - [ ] One deliberate danger trigger end-to-end (e.g. cover all 3 ToF):
       card turns alert color → log entry → DFPlayer asks → say nothing →
-      Telegram message arrives (set TELEGRAM_BOT_TOKEN/CHAT_ID in `.env` first).
+      caretaker PWA gets a push (set `SUPABASE_URL` + `VAPID_*` keys in
+      `/etc/safebath/safebath.env`; without them the alert stays local and
+      nothing is lost).
 - [ ] Cross-modal sanity: thud while standing still (no motion) does NOT
       escalate; stomp (motion confirmed) DOES.
 

@@ -9,29 +9,32 @@
  *   Water flow sensor signal -> GPIO34
  *   DFPlayer RX/TX -> 17 (TX2) / 16 (RX2); amplifier from SPK_R
  *
- * Publishes the Section 3 contract ~3 Hz on sensor/tof_thermal/status and
- * handles the voice/trigger -> DFPlayer prompt flow.
+ * POSTs the contract ~3 Hz to /api/v1/telemetry and, on collapse, plays the
+ * DFPlayer prompt and POSTs an event {"prompt":"are_you_ok"} so the audio
+ * board (Board 4) claims it via /api/v1/voice/pending and starts listening.
  *
- * Libraries: PubSubClient, Adafruit_VL53L1X, Adafruit_AMG88xx,
- *            DFRobotDFPlayerMini
+ * Libraries: Adafruit_VL53L1X, Adafruit_AMG88xx, DFRobotDFPlayerMini
+ *            (no PubSubClient)
  */
 #include <WiFi.h>
-#include <PubSubClient.h>
+#include "../common/SafeBathNode.h"
 #include <Wire.h>
 #include <Adafruit_VL53L1X.h>
 #include <Adafruit_AMG88xx.h>
 #include <DFRobotDFPlayerMini.h>
 #include <HardwareSerial.h>
 
+const char* device_id = "tof-01";           // must match SAFEBATH_DEVICES
 const char* ssid = "YOUR_ROUTER_SSID";
 const char* password = "YOUR_ROUTER_PASSWORD";
-const char* mqtt_server = "192.168.1.20";   // laptop IP from step 0
+const char* server_host = "192.168.1.50";   // RPi IP running the edge API
+const uint16_t server_port = 8000;
+const char* node_token = "";                // optional; matches device token
 
-WiFiClient espClient;
-PubSubClient client(espClient);
+safebath::Node node(device_id, "tof", "1.0.0");
 
 // Network bring-up Step 1 (Network & Autonomous Build Guide Section 1):
-// true = print readings to Serial only, no WiFi/MQTT.
+// true = print readings to Serial only, no network.
 #define DEBUG_SERIAL_ONLY false
 
 // --- I2C bus: shared by all 3 VL53L1X + AMG8833 ---
@@ -65,41 +68,7 @@ void IRAM_ATTR flowISR() { flowPulses++; }
 
 bool TOF_READY = false;
 
-/* -------------------- WiFi / MQTT -------------------- */
-void setup_wifi() {
-  Serial.println();
-  Serial.print("Connecting to WiFi: ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) { delay(300); Serial.print("."); }
-  Serial.println();
-  Serial.println("WiFi connected!");
-  Serial.print("ESP32 IP: ");
-  Serial.println(WiFi.localIP());
-}
-
-void reconnectMQTT() {
-  while (!client.connected()) {
-    Serial.print("Connecting to MQTT...");
-    if (client.connect("TofThermalVoiceNode5")) {
-      Serial.println("connected");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" retrying...");
-      delay(500);
-    }
-  }
-  client.subscribe("voice/trigger");   // Section 8 — Voice Bridge cross-board flow
-}
-
-void onMqttMessage(char* topic, byte* payload, unsigned int length) {
-  String msg;
-  for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
-  if (String(topic) == "voice/trigger") {
-    playVoicePrompt();
-  }
-}
+void playVoicePrompt();   // defined below; also called from loop()
 
 /* -------------------- ToF boot sequence -------------------- */
 // All 3 sensors ship with the same default address (0x29). Bring them
@@ -237,16 +206,27 @@ void setup() {
   }
   dfPlayer.volume(22);   // 0-30, tune against the amplifier's gain
 
-  setup_wifi();
-  client.setServer(mqtt_server, 1883);
-  client.setCallback(onMqttMessage);
+  node.begin(ssid, password, server_host, server_port, node_token);
   Serial.println("[main] node ready.");
+}
+
+/* Voice Bridge playback: claim prompts not yet spoken and play them. Playback
+ * is leased independently of Board 4's listen lease, so both boards are served
+ * by the same request (HTTP equivalent of the old voice/trigger fan-out). */
+void pollVoicePrompt() {
+  String body = node.getJson("/api/v1/voice/pending?device_id=tof-01&role=play");
+  if (body.length() == 0) return;
+  String flat = body;
+  flat.replace(" ", "");
+  if (flat.indexOf("\"has_request\":true") < 0) return;
+  Serial.println("[voice] playing prompt");
+  playVoicePrompt();
 }
 
 /* -------------------- Loop -------------------- */
 void loop() {
-  if (!client.connected()) reconnectMQTT();
-  client.loop();
+  static unsigned long lastVoicePoll = 0;
+  static bool prevCollapse = false;
 
   float thermalFrame[64];
   amg.readPixels(thermalFrame);
@@ -261,7 +241,7 @@ void loop() {
   // Section 7 danger rule: unattended hot fill is checked here, but the
   // actual cross-check against Board 1's mat state happens in
   // backend/cross_modal.py (scald_shutoff_confirmed) — this firmware-only
-  // version is the safe local fallback if MQTT/backend is briefly down.
+  // version is the safe local fallback if the backend is briefly down.
   bool unattendedHotFill = (flowCount > 50 && avgTemp > 38.0);
 
   if (DEBUG_SERIAL_ONLY) {
@@ -277,7 +257,7 @@ void loop() {
                   "collapse=%d hotfill=%d\n",
                   d1, d2, d3, avgTemp, flowCount, collapseFlag, unattendedHotFill);
     delay(300);
-    return;   // skip WiFi/MQTT entirely until Step 1 passes
+    return;   // skip the network entirely until Step 1 passes
   }
 
   if (unattendedHotFill) {
@@ -289,12 +269,21 @@ void loop() {
                     ",\"tof_collapse\":" + (collapseFlag ? "true" : "false") +
                     ",\"unattended_hot_fill\":" + (unattendedHotFill ? "true" : "false") + "}";
 
-  client.publish("sensor/tof_thermal/status", payload.c_str());
+  int code = 0;
+  node.telemetry(payload.c_str(), &code);
 
-  if (collapseFlag) {
-    // High-severity per Section 7 — trigger Voice Bridge directly rather
-    // than waiting on the laptop-side fusion engine's next poll cycle.
-    client.publish("voice/trigger", "{\"prompt\":\"are_you_ok\"}");
+  // Record one voice request on the rising edge of a collapse (Board 4 will
+  // claim it to listen; we claim it to play).
+  if (collapseFlag && !prevCollapse) {
+    int vcode = 0;
+    node.event("{\"prompt\":\"are_you_ok\"}", &vcode);
+    Serial.printf("[voice] trigger posted -> HTTP %d\n", vcode);
+  }
+  prevCollapse = collapseFlag;
+
+  if (millis() - lastVoicePoll > 1000) {        // voice_poll_interval_s = 1
+    lastVoicePoll = millis();
+    pollVoicePrompt();
   }
 
   delay(300);

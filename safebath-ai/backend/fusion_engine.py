@@ -386,9 +386,9 @@ def main(db_path: str = DEFAULT_DB, poll_seconds: float = 1.0,
             # dispatch caretaker alerts for escalations / high-severity flags
             try:
                 from backend.caretaker_api import dispatch_alert
-                dispatch_alert(result, conn)
-            except Exception:
-                pass
+                dispatch_alert(result, conn, db_path)
+            except Exception as e:
+                print(f"[fusion] dispatch_alert failed for event {r['id']}: {e}")
         conn.commit()
         if once:
             print(f"[fusion] processed through event id {last_id}; "

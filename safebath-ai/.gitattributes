@@ -1,0 +1,3 @@
+# Deployment scripts must stay LF (Linux); Windows should NOT CRLF them.
+deployment/raspberry_pi/*.sh       text eol=lf
+deployment/raspberry_pi/*.service  text eol=lf

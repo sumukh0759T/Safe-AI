@@ -25,15 +25,24 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.db import DEFAULT_DB, get_conn, init_db
+from backend.telemetry_store import init_telemetry
 
 from backend.caretaker_api import caretaker_app
+from backend.ingestion_api import api_v1_router
 
 app = FastAPI(title="SafeBath AI")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                    allow_headers=["*"])
 app.mount("/caretaker", caretaker_app)
+app.include_router(api_v1_router)
 
 DB_PATH = os.environ.get("SQLITE_PATH", DEFAULT_DB)
+# device health windows (seconds since last message)
+DEVICE_ONLINE_AFTER = 90.0
+DEVICE_STALE_AFTER = 600.0
+SIMULATED_DEVICES = {d.strip() for d in
+                     os.environ.get("SAFEBATH_SIMULATED_DEVICES", "").split(",")
+                     if d.strip()}
 MODULE_TOPICS = [
     ("mat", "sensor/mat/frame"),
     ("radar", "sensor/radar/status"),
@@ -43,6 +52,87 @@ MODULE_TOPICS = [
 ]
 DANGER_TOPICS = {"sensor/radar/status", "sensor/tof_thermal/status",
                  "sensor/audio/event"}
+
+
+def _device_statuses(db_path: str) -> list:
+    """Per-device online/offline/stale/simulated status for the dashboard."""
+    from backend.device_manager import device_manager
+    now = time.time()
+    conn = get_conn(db_path)
+    sess = {}
+    try:
+        try:
+            for r in conn.execute(
+                    "SELECT device_id, last_seen, last_status FROM "
+                    "telemetry_devices"):
+                sess[r["device_id"]] = r
+        except sqlite3.OperationalError:
+            sess = {}     # protocol tables not created yet (bare DB)
+    finally:
+        conn.close()
+    out = []
+    for device_id, dev in device_manager.devices.items():
+        row = sess.get(device_id)
+        last_seen = row["last_seen"] if row else None
+        age = (now - last_seen) if last_seen is not None else None
+        if last_seen is None:
+            status = "offline"
+        elif age <= DEVICE_ONLINE_AFTER:
+            status = "online"
+        elif age <= DEVICE_STALE_AFTER:
+            status = "stale"
+        else:
+            status = "offline"
+        simulated = device_id in SIMULATED_DEVICES or \
+            device_id.lower().startswith("sim-")
+        out.append({
+            "device_id": device_id,
+            "module": dev.module,
+            "name": dev.name,
+            "status": status,
+            "last_seen": last_seen,
+            "age_seconds": round(age) if age is not None else None,
+            "sensor_status": row["last_status"] if row else "ok",
+            "simulated": simulated,
+            "registered": dev.enabled,
+        })
+    return out
+
+
+def _emergency_summary(db_path: str) -> dict:
+    conn = get_conn(db_path)
+    try:
+        counts = {r["state"]: r["n"] for r in conn.execute(
+            "SELECT state, COUNT(*) AS n FROM emergency_events "
+            "GROUP BY state")}
+        recent = conn.execute(
+            "SELECT event_id, ts, severity, message, trigger_name, state, "
+            "local_alarm_fired, sync_status, ack_ts, ack_by "
+            "FROM emergency_events ORDER BY ts DESC LIMIT 8").fetchall()
+    finally:
+        conn.close()
+    return {
+        "counts": {"active": counts.get("active", 0),
+                   "acknowledged": counts.get("acknowledged", 0),
+                   "resolved": counts.get("resolved", 0)},
+        "recent": [dict(r) for r in recent],
+    }
+
+
+def _local_status(db_path: str) -> dict:
+    from backend import outbox, push_service
+    return {
+        "local_db_ok": True,
+        "outbox": outbox.counts(db_path),
+        "oldest_pending_ts": outbox.oldest_pending_ts(db_path),
+        "push_subscriptions": push_service.count_subscriptions(db_path),
+        "push_deliveries": push_service.delivery_summary(db_path),
+    }
+
+
+def _cloud_status(db_path: str) -> dict:
+    from backend import supabase_sync
+    return supabase_sync.cloud_status(db_path)
 
 
 def _danger_level(topic: str, payload: str) -> str:
@@ -94,7 +184,7 @@ def _seed_mock_if_empty(conn: sqlite3.Connection) -> None:
 
 @app.get("/api/latest")
 def latest():
-    init_db(DB_PATH)
+    init_telemetry(DB_PATH)
     conn = get_conn(DB_PATH)
     _seed_mock_if_empty(conn)
 
@@ -146,6 +236,37 @@ def latest():
         "mat_frame": {"values": mat_values, "rows": 16, "cols": 4},
         "mat_frames_recent": list(reversed(recent_frames)),
         "risk_history": list(reversed(history)),
+        # ---- additive fields (new client feature additions) ----------------
+        "source": "real" if not _any_simulated(conn) else "simulated",
+        "devices": _device_statuses(DB_PATH),
+        "emergencies": _emergency_summary(DB_PATH),
+        "local": _local_status(DB_PATH),
+        "cloud": _cloud_status(DB_PATH),
+    }
+
+
+def _any_simulated(conn: sqlite3.Connection) -> bool:
+    """Does today's feed look like the mock publisher (sim-* ids or the
+    mock-seed marker that api_server injects during bring-up)?"""
+    if SIMULATED_DEVICES:
+        return True
+    row = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE payload LIKE '[mock-seed]%'"
+    ).fetchone()
+    return bool(row[0])
+
+
+@app.get("/api/system/status")
+def system_status():
+    """Offline-first dashboard health: local DB, outbox, push, device statuses,
+    and (best-effort) cloud reachability — nothing here blocks on the cloud."""
+    init_telemetry(DB_PATH)
+    return {
+        "generated_ts": time.time(),
+        "devices": _device_statuses(DB_PATH),
+        "emergencies": _emergency_summary(DB_PATH),
+        "local": _local_status(DB_PATH),
+        "cloud": _cloud_status(DB_PATH),
     }
 
 

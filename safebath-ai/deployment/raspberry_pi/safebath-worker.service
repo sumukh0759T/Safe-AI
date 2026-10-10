@@ -1,0 +1,48 @@
+# SafeBath AI — cloud sync + web-push worker service (systemd).
+#
+# Rendered from this template by deployment/raspberry_pi/install.sh into
+# /etc/systemd/system/safebath-worker.service. Placeholders — @INSTALL_DIR@,
+# @DATA_DIR@, @ETC_DIR@, @RUN_AS@ — are substituted at install time.
+#
+# Drains the durable SQLite outbox to Supabase and delivers caretaker web-push
+# notifications. If SUPABASE_URL / VAPID keys are unset the worker simply logs
+# "cloud disabled" and keeps probing: the local safety pipeline is unaffected
+# and nothing is lost (rows stay queued with bounded backoff).
+
+[Unit]
+Description=SafeBath AI sync worker (outbox -> Supabase + web push)
+Wants=network-online.target
+After=network-online.target safebath.service
+
+[Service]
+Type=simple
+User=@RUN_AS@
+Group=@RUN_AS@
+WorkingDirectory=@INSTALL_DIR@
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=@ETC_DIR@/safebath.env
+
+ExecStartPre=@INSTALL_DIR@/venv/bin/python -c "from backend.telemetry_store import init_telemetry; init_telemetry()"
+ExecStart=@INSTALL_DIR@/venv/bin/python -m backend.supabase_sync
+
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=0
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=safebath-worker
+
+TimeoutStopSec=20
+KillSignal=SIGTERM
+KillMode=control-group
+SendSIGKILL=yes
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=@DATA_DIR@
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

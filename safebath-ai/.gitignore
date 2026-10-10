@@ -18,6 +18,11 @@ models/*.json
 # env
 .env
 
+# deployment — runtime artifacts created by install.sh if a custom
+# SAFEBATH_ETC_DIR/INSTALL_DIR is pointed inside the repo (never commit these)
+deployment/raspberry_pi/*.env
+deployment/raspberry_pi/install.conf
+
 # node
 frontend/node_modules/
 frontend/dist/

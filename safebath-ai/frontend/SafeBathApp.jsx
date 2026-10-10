@@ -15,7 +15,21 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-const LIVE_URL = "http://localhost:8000/api/latest";
+/* API base is configurable so the same static bundle works on the Pi, a phone
+ * on the LAN, or a hosted dashboard. Override with either of:
+ *   window.SAFEBATH_API_BASE = "http://192.168.1.20:8000"   (set before load)
+ *   <meta name="safebath-api-base" content="http://192.168.1.20:8000">
+ * Defaults to the local edge server. */
+function resolveApiBase() {
+  if (typeof window !== "undefined") {
+    if (window.SAFEBATH_API_BASE) return String(window.SAFEBATH_API_BASE).replace(/\/$/, "");
+    const m = document.querySelector('meta[name="safebath-api-base"]');
+    if (m && m.content) return m.content.replace(/\/$/, "");
+  }
+  return "http://localhost:8000";
+}
+const API_BASE = resolveApiBase();
+const LIVE_URL = `${API_BASE}/api/latest`;
 const MAT_ROWS = 16;
 const MAT_COLS = 4;
 const POLL_MS = 3000;
@@ -352,6 +366,82 @@ const Pill = ({ on, labelOn, labelOff }) => (
   </span>
 );
 
+/* --------------------------- system truth -------------------------------- */
+
+const Dot = ({ status }) => {
+  const color = status === "online" ? "#22c55e"
+    : status === "stale" ? "#f59e0b"
+    : status === "offline" ? "#64748b" : "#475569";
+  return (
+    <span style={{
+      display: "inline-block", width: 8, height: 8, borderRadius: 999,
+      background: color, marginRight: 6, verticalAlign: "middle",
+    }} />
+  );
+};
+
+/* Surfaces the additive truth fields the edge server exposes on /api/latest:
+ *   source: "real" | "simulated"
+ *   devices / emergencies / local (outbox) / cloud  — see api_server.py
+ * Everything degrades gracefully when a field is missing (older backend). */
+function SystemTruth({ snap, mode }) {
+  const devices = Array.isArray(snap.devices) ? snap.devices : [];
+  const counts = (snap.emergencies && snap.emergencies.counts) || {};
+  const local = snap.local || {};
+  const cloud = snap.cloud || {};
+  const outbox = local.outbox || {};
+  const pending = (Number(outbox.queued) || 0) + (Number(outbox.failed) || 0) +
+    (Number(outbox.in_flight) || 0) + (Number(outbox.pending) || 0);
+
+  const source = snap.source || (mode === "live" ? "real" : "simulated");
+  const simulated = source !== "real";
+  const activeEmg = Number(counts.active) || 0;
+
+  let cloudText, cloudColor;
+  if (!cloud.configured) { cloudText = "offline-only (cloud not configured)"; cloudColor = "#94a3b8"; }
+  else if (cloud.reachable) { cloudText = "cloud synced"; cloudColor = "#22c55e"; }
+  else { cloudText = `cloud unreachable · ${pending} queued`; cloudColor = "#f59e0b"; }
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap",
+      background: "#0b1220", border: "1px solid #1f2937", borderRadius: 12,
+      padding: "10px 16px", marginBottom: 18, fontSize: 12,
+    }}>
+      <span style={{
+        padding: "3px 10px", borderRadius: 999, fontWeight: 700,
+        background: simulated ? "#422006" : "#052e16",
+        color: simulated ? "#fde68a" : "#bbf7d0",
+      }}>
+        {simulated ? "SIMULATED DATA" : "LIVE HARDWARE"}
+      </span>
+
+      <span style={{ color: cloudColor }}>● {cloudText}</span>
+
+      <span style={{ color: pending > 0 ? "#f59e0b" : "#94a3b8" }}>
+        outbox: {pending} pending
+      </span>
+
+      <span style={{ color: activeEmg > 0 ? "#ef4444" : "#94a3b8", fontWeight: activeEmg > 0 ? 700 : 400 }}>
+        emergencies: {activeEmg} active / {Number(counts.acknowledged) || 0} ack
+      </span>
+
+      <span style={{ display: "flex", gap: 14, flexWrap: "wrap", marginLeft: "auto" }}>
+        {devices.length === 0
+          ? <span style={{ color: "#475569" }}>{simulated ? "no hardware (mock)" : "no devices reported"}</span>
+          : devices.map((d) => (
+            <span key={d.device_id || d.topic} style={{ color: "#cbd5e1" }}>
+              <Dot status={d.status} />
+              {d.device_id || d.topic}
+              {d.simulated ? " (sim)" : ""}
+              {d.age_seconds != null ? ` · ${Math.round(d.age_seconds)}s` : ""}
+            </span>
+          ))}
+      </span>
+    </div>
+  );
+}
+
 /* ------------------------------ main app --------------------------------- */
 
 export default function SafeBathApp() {
@@ -495,6 +585,8 @@ function SafeBathAppInner() {
             ))}
         </svg>
       </div>
+
+      <SystemTruth snap={snap} mode={mode} />
 
       {/* module grid */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 16 }}>

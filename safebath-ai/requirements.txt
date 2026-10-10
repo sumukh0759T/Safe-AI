@@ -1,13 +1,22 @@
-tensorflow>=2.15
-scikit-learn
-numpy
-pandas
-librosa
-paho-mqtt
+# SafeBath AI — runtime dependencies (Raspberry Pi edge server + API).
+# Install on the Pi:  python -m pip install -r requirements.txt
+#
+# NOTE: MQTT has been removed from the active architecture. Boards talk to the
+# Pi over plain HTTP; the Pi is a local-first hub. backend/mqtt_bridge.py is a
+# deprecated legacy shim only and is no longer used by any runtime entrypoint.
+
 fastapi
 uvicorn
+"pydantic>=2"
 httpx
-pydantic
 requests
+numpy
+scikit-learn
 joblib
+pywebpush
 pytest
+
+# --- Training / offline model work only (dev machine, NOT the Pi) ----------
+# The Raspberry Pi 3 runs the rule-based engine plus small joblib/pkl models;
+# it never needs TensorFlow. Install these only on the training PC:
+#   pip install -r requirements-dev.txt

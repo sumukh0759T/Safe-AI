@@ -1,0 +1,19 @@
+{
+  "name": "SafeBath Caretaker",
+  "short_name": "SafeBath",
+  "description": "Offline-first caregiver monitor for the SafeBath bathroom safety system.",
+  "start_url": "./caretaker.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#020617",
+  "theme_color": "#2D398B",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

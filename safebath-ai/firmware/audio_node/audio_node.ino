@@ -15,25 +15,28 @@
  * features. Threshold classification first (Phase D); the trained tiny dense
  * head can replace thresholds later without changing this contract.
  *
- * Voice Bridge reply flow (Master Guide Section 8): after Board 5 publishes
- * voice/trigger, we listen ~8 s and publish voice/reply as fine / help /
- * no_response using RMS + speech-band activity.
+ * Voice Bridge reply flow (Master Guide Section 8): Board 5 posts a voice
+ * trigger event; this board POLLS GET /api/v1/voice/pending?device_id=audio-01,
+ * plays nothing itself (the DFPlayer is on Board 5) but listens ~8 s and POSTs
+ * the reply event as fine / help / no_response.
  *
- * Libraries: arduinoFFT, PubSubClient
+ * Libraries: arduinoFFT (no PubSubClient)
  */
 #include <WiFi.h>
-#include <PubSubClient.h>
+#include "../common/SafeBathNode.h"
 #include <arduinoFFT.h>
 
+const char* device_id = "audio-01";         // must match SAFEBATH_DEVICES
 const char* ssid = "YOUR_ROUTER_SSID";
 const char* password = "YOUR_ROUTER_PASSWORD";
-const char* mqtt_server = "192.168.1.20";   // laptop IP from step 0
+const char* server_host = "192.168.1.50";   // RPi IP running the edge API
+const uint16_t server_port = 8000;
+const char* node_token = "";                // optional; matches device token
 
-WiFiClient espClient;
-PubSubClient client(espClient);
+safebath::Node node(device_id, "audio", "1.0.0");
 
 // Network bring-up Step 1 (Network & Autonomous Build Guide Section 1):
-// true = print features + label to Serial only, no WiFi/MQTT.
+// true = print features + label to Serial only, no network.
 #define DEBUG_SERIAL_ONLY false
 
 #define MIC_PIN 34
@@ -61,31 +64,25 @@ double vReal[FFT_CHUNK];
 double vImag[FFT_CHUNK];
 ArduinoFFT<double> FFT(vReal, vImag, FFT_CHUNK, SAMPLE_RATE_HZ);
 
-/* -------------------- WiFi / MQTT -------------------- */
-void setup_wifi() {
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) delay(300);
-}
-
-void reconnectMQTT() {
-  while (!client.connected()) {
-    client.connect("AudioNode4");
-    delay(500);
-  }
-}
-
+/* -------------------- Voice Bridge (HTTP poll) -------------------- */
 void finishReplyWindow();
 
-void onMqttMessage(char* topic, byte* payload, unsigned int length) {
-  String msg;
-  for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
-  if (String(topic) == "voice/trigger") {
-    listenForReply = true;
-    replyWindowEnd = millis() + 8000;   // ~8 s listen window per contract
-    replyRmsSum = 0.0f;
-    replySpeechChunks = 0;
-    replyChunks = 0;
-  }
+// Ask the edge server for a pending voice prompt (listen role). When one is
+// claimed we open the ~8 s listen window; the server leases it for voice_lease_s.
+// A separate board (Board 5) claims the same request with role=play to speak it.
+void pollVoiceRequest() {
+  if (listenForReply) return;                 // already listening
+  String body = node.getJson("/api/v1/voice/pending?device_id=audio-01&role=listen");
+  if (body.length() == 0) return;
+  String flat = body;
+  flat.replace(" ", "");
+  if (flat.indexOf("\"has_request\":true") < 0) return;
+  listenForReply = true;
+  replyWindowEnd = millis() + 8000;           // ~8 s listen window per contract
+  replyRmsSum = 0.0f;
+  replySpeechChunks = 0;
+  replyChunks = 0;
+  Serial.println("[voice] claimed prompt; listening 8 s");
 }
 
 /* -------- features: identical math to datasets/audio_features.py ------- */
@@ -150,21 +147,24 @@ void finishReplyWindow() {
   else reply = "no_response";
 
   String payload = String("{\"reply\":\"") + reply + "\"}";
-  client.publish("voice/reply", payload.c_str());
+  int code = 0;
+  node.event(payload.c_str(), &code);
+  Serial.printf("[voice] reply=%s -> HTTP %d\n", reply.c_str(), code);
 }
 
 /* --------------------------- Setup / Loop ------------------------------- */
 void setup() {
   Serial.begin(115200);
   analogSetPinAttenuation(MIC_PIN, ADC_11db);   // full 0-3.3V range
-  setup_wifi();
-  client.setServer(mqtt_server, 1883);
-  client.setCallback(onMqttMessage);
+  node.begin(ssid, password, server_host, server_port, node_token);
 }
 
 void loop() {
-  if (!client.connected()) reconnectMQTT();
-  client.loop();
+  static unsigned long lastVoicePoll = 0;
+  if (millis() - lastVoicePoll > 1000) {        // voice_poll_interval_s = 1
+    lastVoicePoll = millis();
+    pollVoiceRequest();
+  }
 
   extractFeaturesChunk();
 
@@ -188,7 +188,9 @@ void loop() {
     } else {
       String payload = String("{\"label\":\"") + label +
                        "\",\"energy\":" + String(rms, 3) + "}";
-      client.publish("sensor/audio/event", payload.c_str());
+      int code = 0;
+      node.telemetry(payload.c_str(), &code);
+      Serial.printf("[audio] %s -> HTTP %d\n", payload.c_str(), code);
     }
 
     rmsAccum = zcrAccum = centroidAccum = 0.0f;

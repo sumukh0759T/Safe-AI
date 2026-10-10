@@ -6,26 +6,28 @@
  *   TCS3200 S0/S1/S2/S3 -> GPIO18/19/21/22, OUT -> GPIO23
  *   MQ-135 A0 -> GPIO35 (ADC1), MQ-3 A0 -> GPIO34 (ADC1)
  *
- * Publishes the Section 3 contract every 2 s — note NO temp_c:
- *   sensor/toilet/reading :
+ * Publishes the contract to the RPi over HTTP every 2 s — note NO temp_c:
+ *   POST /api/v1/telemetry  payload
  *   {"gas_ppm": float, "voc_ppm": float, "turbidity": float,
  *    "hour_of_day": int}
  *
- * Libraries: PubSubClient
+ * Libraries: none beyond the ESP32 core (HTTPClient + WiFi + time)
  */
 #include <WiFi.h>
-#include <PubSubClient.h>
+#include "../common/SafeBathNode.h"
 #include <time.h>
 
+const char* device_id = "toilet-01";        // must match SAFEBATH_DEVICES
 const char* ssid = "YOUR_ROUTER_SSID";
 const char* password = "YOUR_ROUTER_PASSWORD";
-const char* mqtt_server = "192.168.1.20";   // laptop IP from step 0
+const char* server_host = "192.168.1.50";   // RPi IP running the edge API
+const uint16_t server_port = 8000;
+const char* node_token = "";                // optional; matches device token
 
-WiFiClient espClient;
-PubSubClient client(espClient);
+safebath::Node node(device_id, "toilet", "1.0.0");
 
 // Network bring-up Step 1 (Network & Autonomous Build Guide Section 1):
-// true = print readings to Serial only, no WiFi/MQTT.
+// true = print readings to Serial only, no network.
 #define DEBUG_SERIAL_ONLY false
 
 // --- pins (final confirmed) ---
@@ -47,32 +49,6 @@ const float VOC_SCALE = 0.16f;
 
 unsigned long lastPublish = 0;
 
-void setup_wifi() {
-  Serial.println();
-  Serial.print("Connecting to WiFi: ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) { delay(300); Serial.print("."); }
-  Serial.println();
-  Serial.println("WiFi connected!");
-  Serial.print("ESP32 IP: ");
-  Serial.println(WiFi.localIP());
-}
-
-void reconnectMQTT() {
-  while (!client.connected()) {
-    Serial.print("Connecting to MQTT...");
-    if (client.connect("ToiletNode3")) {
-      Serial.println("connected");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" retrying...");
-      delay(1000);
-    }
-  }
-}
-
 void setup() {
   Serial.begin(115200);
   Serial.println();
@@ -93,8 +69,7 @@ void setup() {
   Serial.println("[tcs] TCS3200 pins configured (20% scaling)");
 
   configTime(0, 0, "pool.ntp.org");    // hour_of_day needs wall-clock time
-  setup_wifi();
-  client.setServer(mqtt_server, 1883);
+  node.begin(ssid, password, server_host, server_port, node_token);
   Serial.println("[main] toilet node ready.");
 }
 
@@ -135,9 +110,6 @@ int hourOfDay() {
 }
 
 void loop() {
-  if (!client.connected()) reconnectMQTT();
-  client.loop();
-
   if (millis() - lastPublish < 2000) return;   // contract: every 2 s
   lastPublish = millis();
 
@@ -160,6 +132,8 @@ void loop() {
                    ",\"voc_ppm\":" + String(vocPpm, 2) +
                    ",\"turbidity\":" + String(turbidity, 2) +
                    ",\"hour_of_day\":" + hourOfDay() + "}";
-  bool ok = client.publish("sensor/toilet/reading", payload.c_str());
-  Serial.println(ok ? ("MQTT -> " + payload) : "MQTT publish failed");
+  int code = 0;
+  bool ok = node.telemetry(payload.c_str(), &code);
+  Serial.printf("[toilet] HTTP %d %s -> %s\n", code,
+                ok ? "ok" : "FAILED", payload.c_str());
 }

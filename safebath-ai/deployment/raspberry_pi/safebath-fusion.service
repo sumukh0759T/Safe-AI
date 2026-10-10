@@ -1,0 +1,49 @@
+# SafeBath AI — fusion engine service (systemd).
+#
+# Rendered from this template by deployment/raspberry_pi/install.sh into
+# /etc/systemd/system/safebath-fusion.service. Placeholders — @INSTALL_DIR@,
+# @DATA_DIR@, @ETC_DIR@, @RUN_AS@ — are substituted at install time.
+#
+# Replays new rows from the `events` table through the FusionEngine, persists
+# risk_state/state_log, and calls caretaker_api.dispatch_alert(), which creates
+# the durable emergency row, fires the LOCAL alarm immediately, and queues
+# cloud/web-push via the outbox. Never depends on network or Supabase.
+
+[Unit]
+Description=SafeBath AI fusion engine (rules + ML -> risk_state -> emergencies)
+Wants=network-online.target
+After=network-online.target safebath.service
+
+[Service]
+Type=simple
+User=@RUN_AS@
+Group=@RUN_AS@
+WorkingDirectory=@INSTALL_DIR@
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=@ETC_DIR@/safebath.env
+
+ExecStartPre=@INSTALL_DIR@/venv/bin/python -c "from backend.telemetry_store import init_telemetry; init_telemetry()"
+ExecStart=@INSTALL_DIR@/venv/bin/python @INSTALL_DIR@/backend/fusion_engine.py
+
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=safebath-fusion
+
+TimeoutStopSec=15
+KillSignal=SIGTERM
+KillMode=control-group
+SendSIGKILL=yes
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=@DATA_DIR@
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

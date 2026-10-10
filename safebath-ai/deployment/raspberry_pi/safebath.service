@@ -1,0 +1,58 @@
+# SafeBath AI — edge API service (systemd).
+#
+# Rendered from this template by deployment/raspberry_pi/install.sh
+# into /etc/systemd/system/safebath.service. Placeholders — @INSTALL_DIR@,
+# @DATA_DIR@, @ETC_DIR@, @RUN_AS@ — are substituted at install time, so this
+# copy can be committed to git without exposing usernames, IPs, or secrets.
+#
+# Runtime model:
+#   * single FastAPI process (venv python backend/api_server.py), reads
+#     API_PORT / SQLITE_PATH / SAFEBATH_DEVICES from the 0600 env file
+#   * logs -> journald (journalctl -u safebath -f)
+#   * SIGTERM + TimeoutStopSec for a graceful uvicorn shutdown
+#   * ExecStartPre sanity-imports the telemetry store so a broken venv or
+#     unwritable DB path fails here (before start), not on first request.
+
+[Unit]
+Description=SafeBath AI edge server (v1 telemetry ingestion + /api/latest + /caretaker)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=@RUN_AS@
+Group=@RUN_AS@
+WorkingDirectory=@INSTALL_DIR@
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=@ETC_DIR@/safebath.env
+
+# Fail fast at startup if the runtime is broken (imports telemetry_store and
+# ensures the SQLite schema/WAL exist). Mirrors the API server's own
+# boot-time logic so the service never crash-loops on first request.
+ExecStartPre=@INSTALL_DIR@/venv/bin/python -c "from backend.telemetry_store import init_telemetry; init_telemetry()"
+ExecStart=@INSTALL_DIR@/venv/bin/python @INSTALL_DIR@/backend/api_server.py
+
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=safebath-api
+
+TimeoutStopSec=20
+KillSignal=SIGTERM
+KillMode=control-group
+SendSIGKILL=yes
+
+# Hardening: dedicated low-risk service user, no device boot into /dev,
+# read-only root filesystem, only the data dir is writable.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=@DATA_DIR@
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

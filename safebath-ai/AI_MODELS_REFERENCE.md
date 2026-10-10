@@ -22,9 +22,9 @@
 │  ESP32 Boards (sensor firmware)                                             │
 │    Board 1: Mat ─────┐                                                      │
 │    Board 2: Radar ───┤                                                      │
-│    Board 3: Toilet ──┤  MQTT (1883)  ┌──────────┐  SQLite  ┌──────────────┐ │
-│    Board 4: Audio ───┼──────────────►│ Mosquitto├─────────►│ data/events  │ │
-│    Board 5: ToF/Therm┘               │ Broker   │          │     .db      │ │
+│    Board 3: Toilet ──┤  HTTP/JSON  ┌──────────┐  SQLite  ┌──────────────┐ │
+│    Board 4: Audio ───┼──────────────►│ FastAPI  ├─────────►│ data/events  │ │
+│    Board 5: ToF/Therm┘               │ edge:8000│          │     .db      │ │
 │                                      └──────────┘          └──────┬───────┘ │
 │                                                                   │         │
 │                                        ┌──────────────────────────┘         │
@@ -137,7 +137,7 @@
 
 - **Backend:** Optional `thermal_hazard_fn` callback in `FusionEngine`. If model is absent, falls back to heuristic: `avg_thermal_c > 38.0`.
 - **Firmware:** Designed for on-device TFLite inference on Board 5's ESP32 (C header available). Currently, Board 5 firmware sends raw sensor data; backend does inference.
-- **Scald pipeline:** When `unattended_hot_fill=True` AND user pressure is present → `scald_shutoff` action → solenoid relay close + Telegram push escalation.
+- **Scald pipeline:** When `unattended_hot_fill=True` AND user pressure is present → `scald_shutoff` action → solenoid relay close + caretaker PWA push escalation.
 
 ### 2. Thermal Freeze CNN+LSTM Performance
 
@@ -220,7 +220,7 @@
 
 ### Current Fallback
 
-Board 4 firmware uses **hardcoded threshold classification** (`classify()` function with RMS/ZCR/centroid thresholds) — this is the "bring-up" approach that works without any trained model. The Dense head is designed to replace these thresholds without changing the MQTT contract.
+Board 4 firmware uses **hardcoded threshold classification** (`classify()` function with RMS/ZCR/centroid thresholds) — this is the "bring-up" approach that works without any trained model. The Dense head is designed to replace these thresholds without changing the HTTP/wire contract.
 
 ### 4. Audio Distress Head Performance
 

@@ -1,49 +1,26 @@
 @echo off
-REM SafeBath AI -- Start all services
-REM Run this script to start Mosquitto, Bridge, Fusion Engine, API, and Dashboard
+REM SafeBath AI -- start all local services (offline-first HTTP architecture).
+REM No MQTT broker is needed: boards POST directly to the API on :8000.
+REM
+REM Services: Fusion Engine -> API Server -> Supabase sync worker -> Dashboard.
+REM Cloud (Supabase / web push) is optional; everything local works without it.
 
 set SAFEBATH_DIR=%~dp0
-cd /d "%SAFEBATH_DIR%"
+cd /d "%SAFBATH_DIR%"
+
+set PY=.venv\Scripts\python.exe
 
 echo ========================================
 echo   SafeBath AI -- Starting Services
 echo ========================================
 
-REM 1. Mosquitto broker
-echo [1/5] Starting Mosquitto broker...
-tasklist /FI "IMAGENAME eq mosquitto.exe" 2>NUL | find /I "mosquitto.exe" >NUL
-if %ERRORLEVEL% NEQ 0 (
-    start "" /B "C:\Program Files\mosquitto\mosquitto.exe" -c "%SAFEBATH_DIR%mosquitto.conf"
-    timeout /t 2 /nobreak >NUL
-    echo       Mosquitto started on :1883
-) else (
-    echo       Mosquitto already running
-)
+REM 1. Fusion Engine (raw events -> risk state -> emergencies/alerts)
+echo [1/4] Starting Fusion Engine...
+start "safebath-fusion" /B "%PY%" -u backend/fusion_engine.py
+timeout /t 2 /nobreak >NUL
 
-REM 2. MQTT Bridge
-echo [2/5] Starting MQTT Bridge...
-tasklist /FI "WINDOWTITLE eq safebath-bridge" 2>NUL | find /I "python" >NUL
-if %ERRORLEVEL% NEQ 0 (
-    start "safebath-bridge" /B ".venv\Scripts\python.exe" -u backend/mqtt_bridge.py
-    timeout /t 2 /nobreak >NUL
-    echo       Bridge started
-) else (
-    echo       Bridge already running
-)
-
-REM 3. Fusion Engine
-echo [3/5] Starting Fusion Engine...
-tasklist /FI "WINDOWTITLE eq safebath-fusion" 2>NUL | find /I "python" >NUL
-if %ERRORLEVEL% NEQ 0 (
-    start "safebath-fusion" /B ".venv\Scripts\python.exe" -u backend/fusion_engine.py
-    timeout /t 2 /nobreak >NUL
-    echo       Fusion engine started
-) else (
-    echo       Fusion engine already running
-)
-
-REM 4. API Server
-echo [4/5] Starting API Server...
+REM 2. API Server (ESP32 HTTP ingestion + dashboard/caretaker API)
+echo [2/5] Starting API Server...
 netstat -an | findstr ":8000" | findstr "LISTENING" >NUL
 if %ERRORLEVEL% NEQ 0 (
     start "safebath-api" /B ".venv\Scripts\python.exe" -u -m uvicorn backend.api_server:app --port 8000 --host 0.0.0.0
@@ -53,11 +30,17 @@ if %ERRORLEVEL% NEQ 0 (
     echo       API server already running on :8000
 )
 
-REM 5. HTTP Dashboard
-echo [5/5] Starting Dashboard Server...
+REM 3. Supabase sync worker (durable outbox -> cloud + web push; no-op if unset)
+echo [3/4] Starting Supabase sync worker...
+start "safebath-worker" /B ".venv\Scripts\python.exe" -u -m backend.supabase_sync
+timeout /t 1 /nobreak >NUL
+echo       Worker started (cloud sync disabled until SUPABASE_URL is set)
+
+REM 4. Dashboard / caretaker static server
+echo [4/4] Starting Dashboard Server...
 netstat -an | findstr ":8080" | findstr "LISTENING" >NUL
 if %ERRORLEVEL% NEQ 0 (
-    start "safebath-dashboard" /B ".venv\Scripts\python.exe" -m http.server 8080
+    start "safebath-dashboard" /B ".venv\Scripts\python.exe" -m http.server 8080 -d frontend
     timeout /t 1 /nobreak >NUL
     echo       Dashboard started on :8080
 ) else (
@@ -67,7 +50,8 @@ if %ERRORLEVEL% NEQ 0 (
 echo.
 echo ========================================
 echo   All services started!
-echo   Dashboard:  http://localhost:8080
+echo   Dashboard:  http://localhost:8080/
 echo   Caretaker:  http://localhost:8080/caretaker.html
 echo   API:        http://localhost:8000/api/latest
+echo   Boards POST to http://<this-pc-ip>:8000/api/v1/telemetry
 echo ========================================

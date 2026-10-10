@@ -6,24 +6,25 @@
  *   CD4067  S0/S1/S2/S3 -> GPIO16/17/18/19      SIG -> GPIO34 (ADC1)
  *   74HC595 DS/SH_CP/ST_CP -> GPIO23/25/26       Q1-Q4 -> mat columns
  *   PIR     OUT -> GPIO27
- * Publishes the Section 3 contract:
- *   sensor/mat/frame : CSV, 64 ints (16 rows x 4 cols, row-major), @10 Hz
- *   sensor/mat/pir   : {"entry": true|false}    on change
+ * POSTs the Section 3 contract to the RPi over HTTP (no MQTT):
+ *   POST /api/v1/telemetry  payload {"values":[64 ints, row-major]}  @10 Hz
+ *   POST /api/v1/event      payload {"entry": true|false}            on change
  *
- * Libraries: PubSubClient
+ * Libraries: none beyond the ESP32 core (HTTPClient + WiFi).
  */
-#include <WiFi.h>
-#include <PubSubClient.h>
+#include "../common/SafeBathNode.h"
 
-const char* ssid = "YOUR_ROUTER_SSID";
-const char* password = "YOUR_ROUTER_PASSWORD";
-const char* mqtt_server = "192.168.1.20";   // laptop IP from step 0
-WiFiClient espClient;
-PubSubClient client(espClient);
+const char* ssid        = "YOUR_ROUTER_SSID";
+const char* password    = "YOUR_ROUTER_PASSWORD";
+const char* server_host = "192.168.1.50";   // RPi IP (edge server)
+const uint16_t server_port = 8000;
+const char* node_token  = "";               // must match SAFEBATH_DEVICES token (if any)
+
+safebath::Node node("mat-01", "mat", "1.0.0");
 
 // Network bring-up Step 1 (Network & Autonomous Build Guide Section 1):
 // keep true until the Serial-only sanity check passes — firmware reads the
-// sensors and prints instead of touching WiFi/MQTT entirely.
+// sensors and prints instead of touching the network entirely.
 #define DEBUG_SERIAL_ONLY false
 
 // --- mux / shift register / PIR (final confirmed pins) ---
@@ -78,39 +79,12 @@ void scanMat() {
   }
 }
 
-/* -------------------- WiFi / MQTT -------------------- */
-void setup_wifi() {
-  Serial.println();
-  Serial.print("Connecting to WiFi: ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) { delay(300); Serial.print("."); }
-  Serial.println();
-  Serial.println("WiFi connected!");
-  Serial.print("ESP32 IP: ");
-  Serial.println(WiFi.localIP());
-}
-
-void reconnectMQTT() {
-  while (!client.connected()) {
-    Serial.print("Connecting to MQTT...");
-    if (client.connect("MatNode1")) {
-      Serial.println("connected");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" retrying...");
-      delay(1000);
-    }
-  }
-}
-
 /* -------------------- Setup -------------------- */
 void setup() {
   Serial.begin(115200);
   Serial.println();
   Serial.println("=================================");
-  Serial.println("SafeBath AI - Mat Node 1 (v2)");
+  Serial.println("SafeBath AI - Mat Node 1 (v3 HTTP)");
   Serial.println("=================================");
 
   pinMode(MUX_S0, OUTPUT); pinMode(MUX_S1, OUTPUT);
@@ -118,8 +92,7 @@ void setup() {
   pinMode(SR_DS, OUTPUT); pinMode(SR_SHCP, OUTPUT); pinMode(SR_STCP, OUTPUT);
   pinMode(PIR_PIN, INPUT);
 
-  setup_wifi();
-  client.setServer(mqtt_server, 1883);
+  node.begin(ssid, password, server_host, server_port, node_token);
   Serial.println("[main] mat node ready.");
 }
 
@@ -127,9 +100,6 @@ void setup() {
 bool lastPirState = false;
 
 void loop() {
-  if (!client.connected()) reconnectMQTT();
-  client.loop();
-
   scanMat();
 
   if (DEBUG_SERIAL_ONLY) {
@@ -150,11 +120,11 @@ void loop() {
                     mn, mx, sum, hotRow, hotCol, digitalRead(PIR_PIN));
     }
     delay(50);
-    return;   // skip WiFi/MQTT entirely until Step 1 passes
+    return;   // skip WiFi entirely until Step 1 passes
   }
 
-  // one flat 64-int CSV, row-major — exactly the Section 3 contract shape
-  String payload = "";
+  // one flat 64-int array, row-major — exactly the schema's {"values":[...]}
+  String payload = "{\"values\":[";
   char buf[8];
   for (int row = 0; row < 16; row++) {
     for (int col = 0; col < 4; col++) {
@@ -165,13 +135,15 @@ void loop() {
       if (!(row == 15 && col == 3)) payload += ",";
     }
   }
-  client.publish("sensor/mat/frame", payload.c_str());
+  payload += "]}";
+  int code = 0;
+  bool ok = node.telemetry(payload.c_str(), &code);
+  Serial.printf("[mat] frame -> %s (code=%d)\n", ok ? "ok" : "failed", code);
 
   bool pir = digitalRead(PIR_PIN);
   if (pir != lastPirState) {
     lastPirState = pir;
-    client.publish("sensor/mat/pir",
-                   pir ? "{\"entry\": true}" : "{\"entry\": false}");
+    node.event(pir ? "{\"entry\": true}" : "{\"entry\": false}");
   }
 
   delay(100);   // ~10 Hz frame rate

@@ -1,7 +1,11 @@
 # SafeBath AI
 
-Elderly-care bathroom safety system: 5 sensor boards -> MQTT -> fusion engine ->
-risk dashboard, with on-edge TinyML models and a Voice Bridge check-in.
+Elderly-care bathroom safety system: 5 ESP32 sensor boards POST JSON over HTTP
+to an on-prem Raspberry Pi FastAPI edge, which validates, stores to local SQLite,
+and runs the fusion/alert pipeline **offline-first** (works with no internet).
+When connectivity exists it opportunistically syncs to Supabase for the cloud
+dashboard and sends caretaker PWA push. On-edge TinyML models + a Voice Bridge
+check-in round out the system.
 
 ## Repo layout
 
@@ -10,8 +14,9 @@ safebath-ai/
   data/          raw/ synthetic/ real/        (generated + fetched datasets)
   datasets/      fetch scripts + procedural generators
   training/      one script per model + tflite conversion + evaluation
-  firmware/      five ESP32 .ino nodes (one per board) + shared model_data/
-  backend/       schemas, mqtt bridge, fusion engine, alert rules, REST API
+  firmware/      five ESP32 .ino nodes (one per board) + common/ shared HTTP runtime
+  backend/       schemas, HTTP ingestion, fusion engine, alert rules, REST API,
+                 offline outbox + optional Supabase sync
   frontend/      SafeBathApp.jsx (Mock/Live dashboard)
   models/        trained artifacts (.h5/.tflite/.pkl) - gitignored
   tests/         pytest suite
@@ -19,18 +24,31 @@ safebath-ai/
 
 ## Hardware data contract (stable interface)
 
-Software never touches GPIO. Everything flows over MQTT with the payload shapes
-in `backend/schemas.py`, mirroring `SafeBath_AI_Final_Master_Guide.md` Section 3:
+Software never touches GPIO. Each board POSTs JSON over HTTP to the edge API;
+payload shapes live in `backend/schemas.py`, mirroring
+`SafeBath_AI_Final_Master_Guide.md` Section 3. Every POST wraps the payload in a
+common envelope (`contract_version, device_id, module, boot_id, seq, timestamp,
+message_type`) defined in `firmware/common/SafeBathTelemetry.h`.
 
-| Board | Topic | Payload |
+| Board | HTTP call (message_type `module`) | Payload |
 |---|---|---|
-| 1 Mat | `sensor/mat/frame` | CSV string, **64 ints** (16 rows x 4 cols, row-major), 12-bit ADC 0-4095 @10Hz |
-| 1 Mat | `sensor/mat/pir` | `{"entry": true}` |
-| 2 Radar | `sensor/radar/status` | `{"presence": bool, "motion": bool, "stillness_ms": int, "possible_collapse": bool}` @2Hz |
-| 3 Toilet | `sensor/toilet/reading` | `{"gas_ppm": float, "voc_ppm": float, "turbidity": float, "hour_of_day": int}` every 2s (`temp_c` optional — pending DS18B20 decision) |
-| 4 Audio | `sensor/audio/event` | `{"label": "silence"|"water"|"impact_thud"|"speech_or_cry", "energy": float}` ~5Hz |
-| 5 ToF/Thermal | `sensor/tof_thermal/status` | `{"avg_thermal_c": float, "flow_pulses": int, "tof_collapse": bool, "unattended_hot_fill": bool}` ~3Hz |
-| 5 Voice | `voice/trigger` sub / `voice/reply` pub | `{"prompt": "are_you_ok"}` / `{"reply": "fine"|"help"|"no_response"}` |
+| 1 Mat | `POST /api/v1/telemetry` `mat` | `{"values": [64 ints]}` (16x4 row-major, 12-bit 0-4095 @10Hz) |
+| 1 Mat PIR | `POST /api/v1/event` `mat` | `{"entry": true}` |
+| 2 Radar | `POST /api/v1/telemetry` `radar` | `{"presence": bool, "motion": bool, "stillness_ms": int, "possible_collapse": bool}` @2Hz |
+| 3 Toilet | `POST /api/v1/telemetry` `toilet` | `{"gas_ppm": float, "voc_ppm": float, "turbidity": float, "hour_of_day": int}` every 2s (`temp_c` optional — pending DS18B20 decision) |
+| 4 Audio | `POST /api/v1/telemetry` `audio` | `{"label": "silence"\|"water"\|"impact_thud"\|"speech_or_cry", "energy": float}` ~5Hz |
+| 5 ToF/Thermal | `POST /api/v1/telemetry` `tof` | `{"avg_thermal_c": float, "flow_pulses": int, "tof_collapse": bool, "unattended_hot_fill": bool}` ~3Hz |
+| 5 Voice trigger | `POST /api/v1/event` `tof` | `{"prompt": "are_you_ok"}` |
+| 5 Voice play | `GET /api/v1/voice/pending?device_id=tof-01&role=play` | claims the prompt to speak it aloud (DFPlayer) |
+| 4 Voice reply | `GET /api/v1/voice/pending?device_id=audio-01&role=listen` then `POST /api/v1/event` `audio` | `{"reply": "fine"\|"help"\|"no_response"}` |
+
+Playback and listening are leased independently (`played_by` vs `claimed_by`),
+so Board 5 can speak a prompt while Board 4 listens — the HTTP replacement for
+the old `voice/trigger` fan-out.
+
+Boards may also `POST /api/v1/heartbeat` (liveness) and `GET /api/v1/config`
+(contract_version + `heartbeat_interval_s`, `voice_poll_interval_s`,
+`voice_lease_s`, endpoint map).
 
 ## Original plan vs. hardware-adapted plan (traceability table)
 
@@ -70,24 +88,25 @@ uvicorn backend.api_server:app --reload --port 8000
 
 ## Run without any hardware (simulated pipeline)
 
-`backend/mock_publisher.py` emits schema-correct MQTT traffic for all 5 boards,
-with deliberate danger spikes, so the whole chain runs before a single board is
-flashed:
+`backend/mock_publisher.py` emits schema-correct payloads for all 5 boards, with
+deliberate danger spikes, so the whole chain runs before a single board is
+flashed. Use **direct mode** (no broker, no internet) — it feeds every payload
+through the same validation + storage path the HTTP edge uses:
 
 ```bash
-# no broker installed? direct mode writes through the bridge's validation path:
+cd safebath-ai
 python backend/mock_publisher.py --mode direct --scenario collapse --auto-reply help --ticks 14
 python backend/fusion_engine.py --once --from-start     # watch state transitions
 uvicorn backend.api_server:app --port 8000              # then open the dashboard
-
-# have mosquitto? use real broker mode instead (--mode broker), plus:
-mosquitto_sub -t "sensor/#" -v                          # watch live traffic
 ```
 
 Scenarios: `default` (periodic spikes), `collapse` (sustained multi-board event),
 `scald` (immediate relay path); `--chaos` injects malformed payloads to prove
-the bridge rejects them loudly. `--auto-reply fine|help` exercises stand-down /
-escalation deterministically.
+the validator rejects them loudly. `--auto-reply fine|help` exercises stand-down
+/ escalation deterministically.
+
+> `--mode broker` (real mosquitto publish) is legacy — the active architecture
+> carries no MQTT; `paho-mqtt` is intentionally not in `requirements.txt`.
 
 ## Run the dashboard frontend
 
@@ -99,17 +118,37 @@ npm run serve          # http://localhost:8080  (or: python -m http.server 8080)
 ```
 
 Toggle **LIVE** in the nav bar; with `api_server` running on :8000 the cards
-populate with real (or simulated) data within ~3 s.
+populate with real (or simulated) data within ~3 s. A **System** strip shows
+whether data is LIVE or SIMULATED, cloud sync state, local outbox depth, device
+freshness, and active emergencies. To point the app at another host, set
+`window.SAFEBATH_API_BASE` or a `<meta name="safebath-api-base" content="...">`
+tag (defaults to `http://localhost:8000`).
+
+## Caretaker PWA (push + offline acks)
+
+`frontend/caretaker.html` is an installable PWA backed by `caretaker_api.py`
+(mounted at `/caretaker`). It registers `frontend/sw.js`, shows active
+emergencies, and can deliver Web Push (VAPID keys via env; delivery requires
+`pywebpush`). Acknowledgements made while offline are queued and replayed on
+reconnect.
 
 ## Hardware bring-up
 
 Follow `NEXT_STEPS_FOR_YOU.md` — per-board Serial-first verification
-(`DEBUG_SERIAL_ONLY` flag in every `.ino`), then WiFi+MQTT, backend, dashboard,
+(`DEBUG_SERIAL_ONLY` flag in every `.ino`), then WiFi+HTTP, backend, dashboard,
 and finally the Phase F all-boards checklist from
 `SafeBath_AI_Network_And_Autonomous_Build_Guide.md` Section 2.5.
 
-Frontend: point any React app at `frontend/SafeBathApp.jsx` (see header comment of
-that file). Toggle Mock/Live in its nav bar; Live polls `http://localhost:8000/api/latest`.
+Point every sketch at your network with one command (rewrites `ssid`, `password`
+and `server_host` in all `firmware/*/*.ino`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File firmware\set_wifi.ps1
+# or: -Ssid 'MyWiFi' -Password 'secret' -ServerHost 192.168.1.50
+```
+
+`server_host` is the RPi running the edge API (port 8000). Credentials are read
+from the git-ignored `firmware/wifi_credentials.local` (never committed).
 
 ## Immediate next steps (from Master Guide §12)
 

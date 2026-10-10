@@ -1,0 +1,10 @@
+# SafeBath AI — development / training extras (NOT for the Raspberry Pi 3).
+#
+# Model training and dataset tooling run on a workstation, then the produced
+# *.pkl / Keras artifacts are copied to the Pi. The edge device stays light
+# (rule-based fusion + joblib models; no TensorFlow).
+-r requirements.txt
+tensorflow>=2.15
+pandas
+librosa
+scikit-learn
