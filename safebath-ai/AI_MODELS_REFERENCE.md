@@ -61,7 +61,13 @@
 
 ---
 
-## Model 1 — Fall Risk ConvLSTM
+## Model 1 — Fall Risk ConvLSTM (LEGACY / INCOMPATIBLE with the four-zone mat)
+
+> **The active mat is a four-zone (2x2) Velostat sensor, not a 12x6 grid.** This
+> model consumes a 72-cell grid and is therefore incompatible with four-zone
+> data. It is retained for the legacy artifact only and is never fed zone
+> frames — the live four-zone fall signal is the explicit rule-based path in
+> `backend/fusion_engine.py`. Do not pad four readings into 72 cells to use it.
 
 | Field | Value |
 |-------|-------|

@@ -254,3 +254,46 @@ def test_four_zone_wins_over_older_grid_event(client, db):
 def test_devices_endpoint_still_lists_mat(client):
     data = client.get("/api/v1/devices").json()
     assert any(d["device_id"] == "mat-01" for d in data["devices"])
+
+
+# --------------------------------------------------------------------------- #
+# Zone order / contract version are explicit and stable
+# --------------------------------------------------------------------------- #
+def test_latest_exposes_canonical_zone_order_and_version(client, db):
+    from backend.schemas import MAT_ZONE_CONTRACT_VERSION, MAT_ZONE_ORDER
+    client.post("/api/v1/telemetry", json=envelope(payload=zone_payload()))
+    latest = client.get("/api/latest").json()
+    assert latest["mat_zone_order"] == list(MAT_ZONE_ORDER)
+    assert latest["mat_zone_contract_version"] == MAT_ZONE_CONTRACT_VERSION
+    assert latest["mat_zones"]["order"] == list(MAT_ZONE_ORDER)
+    assert latest["mat_zones"]["contract_version"] == MAT_ZONE_CONTRACT_VERSION
+    # readings are positional — index i is exactly MAT_ZONE_ORDER[i]
+    assert latest["mat_zones"]["zones"] == [float(z) for z in ZONES]
+
+
+# --------------------------------------------------------------------------- #
+# Four-zone data can never be fed to the 72-cell ConvLSTM path
+# --------------------------------------------------------------------------- #
+def test_zone_frames_never_reach_the_72_cell_ml_path():
+    from backend.fusion_engine import FusionEngine
+    seen = []
+    engine = FusionEngine(now=lambda: 0.0,
+                          fall_classifier=lambda frames: seen.append(frames) or 0)
+    engine.observe(MAT_ZONE_TOPIC,
+                   json.dumps({"sensor_type": "pressure_4zone",
+                               "zones": list(ZONES)}), 1.0)
+    assert len(engine.mat_zone_frames) == 1
+    assert len(engine.mat_frames) == 0      # zones never enter the grid buffer
+    assert seen == []                       # classifier never sees zone data
+
+
+def test_grid_frames_still_feed_the_ml_path_after_20_frames():
+    from backend.fusion_engine import FusionEngine
+    seen = []
+    engine = FusionEngine(now=lambda: 0.0,
+                          fall_classifier=lambda frames: seen.append(frames) or 0)
+    csv = ",".join(str(120 + i) for i in range(MAT_CELL_COUNT))
+    for _ in range(20):
+        engine.observe("sensor/mat/frame", csv, 1.0)
+    assert len(engine.mat_frames) == 20
+    assert len(seen) == 1                    # positive control: grid still works

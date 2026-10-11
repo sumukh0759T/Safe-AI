@@ -161,3 +161,16 @@ class TestPressure4Zone:
 def test_parse_for_topic_unknown_topic():
     with pytest.raises(ValueError):
         parse_for_topic("sensor/unknown/topic", "{}")
+
+
+def test_four_zone_order_contract_is_canonical():
+    from backend.schemas import (MAT_ZONE_CONTRACT_VERSION, MAT_ZONE_COUNT,
+                                 MAT_ZONE_ORDER)
+    assert MAT_ZONE_COUNT == 4
+    assert MAT_ZONE_CONTRACT_VERSION == 1
+    assert MAT_ZONE_ORDER == (
+        "zone_1_top_left",
+        "zone_2_top_right",
+        "zone_3_bottom_left",
+        "zone_4_bottom_right",
+    )

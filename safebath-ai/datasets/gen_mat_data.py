@@ -1,4 +1,14 @@
 """
+LEGACY grid dataset — NOT the active mat.
+
+The physical mat is a four-zone (2x2) Velostat sensor; its frame is four raw
+ADC readings (backend/schemas.py Pressure4ZonePayload, MAT_ZONE_ORDER). This
+generator produces the OLD 12x6 / 72-cell grid sequences used by the legacy
+ConvLSTM artifact ONLY. Do NOT feed four-zone data into this shape and do not
+pad four readings into 72 cells — the two geometries are unrelated. The live
+four-zone fall path is rule-based (backend/fusion_engine.py) until a genuinely
+compatible model is trained and evaluated.
+
 Synthetic pressure-mat training data — 12x6 grid (72 cells, row-major),
 20-frame sequences, 3 classes: 0=normal, 1=unsteady, 2=fall.
 

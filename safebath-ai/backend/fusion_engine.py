@@ -288,7 +288,10 @@ class FusionEngine:
 
         elif topic == "sensor/audio/event":
             label = data["label"]
-            if label == "speech_or_cry":
+            # 6-class audio contract (backend/schemas.AudioLabel): a sustained
+            # distress call is cry_or_scream (the old single "speech_or_cry"
+            # bucket was split; ordinary_speech is NOT distress).
+            if label == "cry_or_scream":
                 self.cry_since = self.cry_since or ts
             else:
                 self.cry_since = None
@@ -333,7 +336,13 @@ class FusionEngine:
 
 # ------------------------------------------------------------------------- #
 def load_optional_models():
-    """Best-effort loading of trained artifacts; everything degrades cleanly."""
+    """Best-effort loading of trained artifacts; everything degrades cleanly.
+
+    The fall ConvLSTM expects the LEGACY 12x6 grid (72 cells). It is only ever
+    invoked from the `sensor/mat/frame` branch, so four-zone frames (which land
+    on `sensor/mat/zones`) can never reach it and no zone data is padded into a
+    grid. Four-zone falls use the explicit rule-based path instead.
+    """
     toilet_model = fall_clf = None
 
     try:

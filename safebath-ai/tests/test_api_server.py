@@ -21,7 +21,15 @@ def test_latest_shape(client):
                 "mat_frame", "mat_frames_recent", "risk_history"):
         assert key in data
     assert set(data["modules"]) == {"mat", "radar", "toilet", "audio", "tof"}
-    assert len(data["mat_frame"]["values"]) == 72
+    # A fresh DB is seeded with the ACTIVE four-zone (2x2) mat geometry; the
+    # legacy 72-cell grid stays empty until old firmware reports a grid frame.
+    assert data["mat_mode"] == "four_zone"
+    assert data["mat_zones"]["count"] == 4
+    assert len(data["mat_zones"]["zones"]) == 4
+    assert data["mat_zone_order"] == [
+        "zone_1_top_left", "zone_2_top_right",
+        "zone_3_bottom_left", "zone_4_bottom_right"]
+    assert data["mat_frame"]["values"] == []
 
 
 def test_mock_seed_populates(client):

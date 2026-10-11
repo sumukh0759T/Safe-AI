@@ -12,11 +12,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   ZONE_COUNT,
   ZONE_META,
+  ZONE_ORDER,
   MatZonesCard,
   buildZoneCells,
   isStale,
   matModeFromSnapshot,
   normalizeZone,
+  snapshotIsSimulated,
   zoneState,
 } from "../matZones.mjs";
 
@@ -121,11 +123,36 @@ test("loading state renders four placeholder cells", () => {
   assert.equal(countZones(html), 4);
 });
 
-test("legacy 72-cell snapshot does not render as four zones", () => {
+test("demo data is always surfaced as simulated; live is never mislabelled", () => {
+  const mock = { _mock: true };
+  assert.equal(snapshotIsSimulated(mock, "mock"), true);
+  assert.equal(snapshotIsSimulated(mock, "live"), true);   // never label mock as live
+  assert.equal(snapshotIsSimulated({ source: "real", _mock: false }, "live"), false);
+  assert.equal(snapshotIsSimulated({ source: "simulated" }, "live"), true);
+  // no provenance + live mode is not silently claimed as real hardware data
+  assert.equal(snapshotIsSimulated({}, "live"), false);
+  assert.equal(snapshotIsSimulated(null, "live"), false);
+  assert.equal(snapshotIsSimulated(null, "mock"), true);
+});
+
+test("zone order is the canonical 2x2 positional order", () => {
+  assert.deepEqual(ZONE_ORDER, [
+    "zone_1_top_left",
+    "zone_2_top_right",
+    "zone_3_bottom_left",
+    "zone_4_bottom_right",
+  ]);
+});
+
+test("four-zone is the default shape; 72-cell data is never misinterpreted", () => {
+  // Default: nothing claims legacy grid, so the four-zone design wins.
+  assert.equal(matModeFromSnapshot({}), "four_zone");
+  assert.equal(matModeFromSnapshot(undefined), "four_zone");
+  assert.equal(matModeFromSnapshot({ mat_mode: "four_zone" }), "four_zone");
+  assert.equal(matModeFromSnapshot({ mat_zones: { zones: [1, 2, 3, 4] } }),
+    "four_zone");
+  // A legacy 72-cell frame is reported as grid, never drawn as four zones.
   assert.equal(matModeFromSnapshot({ mat_mode: "grid" }), "grid");
-  assert.equal(matModeFromSnapshot({}), "grid");
-  assert.equal(matModeFromSnapshot(undefined), "grid");
   assert.equal(matModeFromSnapshot({ mat_frame: { values: new Array(72).fill(0) } }),
     "grid");
-  assert.equal(matModeFromSnapshot({ mat_mode: "four_zone" }), "four_zone");
 });

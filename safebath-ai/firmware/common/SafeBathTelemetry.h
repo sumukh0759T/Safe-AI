@@ -5,10 +5,12 @@
  * firmware mirror of backend/ingestion_api.py — the JSON *key names, values
  * and message_type strings must stay byte-for-byte in sync with the Python
  * contract*, and the payload JSON fragment each board builds must match the
- * payload schemas in backend/schemas.py (12x6 mat frame = 72 ints, etc.).
- * The mat board may instead emit a four-zone frame
+ * payload schemas in backend/schemas.py.
+ * The mat board emits a four-zone frame by default
  * {"sensor_type":"pressure_4zone","zones":[4 readings]} (see
- * backend/schemas.py Pressure4ZonePayload) when built with MAT_ZONE_MODE=1.
+ * backend/schemas.py Pressure4ZonePayload, MAT_ZONE_ORDER). A legacy
+ * 12x6 grid frame ({"values":[72 ints]}) is only built when the mat sketch is
+ * compiled with MAT_ZONE_MODE=0.
  *
  * Each board builds a TelemetryMessage and serializes it to exactly:
  *
@@ -40,8 +42,9 @@
 #define SAFEBATH_CONTRACT_VERSION 1u
 #endif
 
-// Longest serialized message: a mat telemetry frame (~480 chars at 72 ints).
-// Any board may use more; the serializer truncates gracefully to the buffer.
+// Longest serialized message: a legacy 12x6 mat frame (~480 chars at 72 ints)
+// or a four-zone frame (~120 chars). Any board may use more; the serializer
+// truncates gracefully to the buffer.
 #ifndef SAFEBATH_TELEMETRY_MAX_LEN
 #define SAFEBATH_TELEMETRY_MAX_LEN 1024u
 #endif

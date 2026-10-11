@@ -51,20 +51,27 @@ For EACH board below: Arduino IDE → select board/port → upload → walk step
 `DEBUG_SERIAL_ONLY` starts as `false` in the repo files; flip to `true` first,
 do Step 1, then flip back.
 
-### Board 1 — Mat (`firmware/mat_node/mat_node.ino`)
-- [ ] Step 1 (Serial): press each of the 64 intersections one at a time;
-      `mat min= max= sum= peak@r,c pir=` must show ONLY that cell's region jump.
-      If two cells move together → row/column short — fix Velostat wiring before
-      anything else. Then flip DEBUG flag off.
-- [ ] Step 2: `curl http://<rpi>:8000/api/latest` (or the edge log) shows 64-int
-      values @10 Hz + PIR events when you wave at the sensor.
-- [ ] Step 3: rows appear in `data/events.db`; `/api/latest` mat card updates.
-- [ ] Step 4: dashboard Board-1 heatmap animates a footprint; CoP trail follows
-      your steps.
-- [ ] Step 5: press hard and hold → fall-risk path → Voice Bridge prompt.
-- [ ] **Send me the real ADC ranges** (min/max idle vs pressed) so I can replace
-      `CALIB_OFFSET/CALIB_GAIN` in this firmware AND `datasets/gen_mat_data.py`,
-      then retrain the ConvLSTM.
+### Board 1 — Four-zone mat (`firmware/mat_node/mat_node.ino`)
+The mat is now four independent zones (2×2), not a scanned grid. Full procedure:
+`docs/mat_zone_calibration.md`.
+- [ ] **Confirm the wiring first.** `MAT_ZONE_ADC_PINS` in the sketch is a
+      PROPOSED map ({34,35,32,33}) — edit it to match where your four zone
+      electrodes actually land, and confirm the divider polarity. Do not assume.
+- [ ] Step 1 (Serial): set `DEBUG_SERIAL_ONLY true`, press each zone one at a
+      time; `mat 4-zone Z1= Z2= Z3= Z4= pir=` must show ONLY that zone jump.
+      If a neighbour moves too → electrode short/crosstalk; fix wiring first.
+      Then flip the DEBUG flag off.
+- [ ] Step 2: `curl http://<rpi>:8000/api/latest` shows a `mat_zones` frame with
+      four values @10 Hz + PIR events when you wave at the sensor.
+- [ ] Step 3: rows on topic `sensor/mat/zones` appear in `data/events.db`;
+      `/api/latest` mat card updates.
+- [ ] Step 4: dashboard Board-1 card shows the 2×2 four-zone layout (raw ADC per
+      zone). Board-1 falls back to four-zone by default; the 12×6 grid is a
+      legacy compatibility view only.
+- [ ] Step 5: press a zone hard and hold → rule-based fall path → Voice Bridge.
+- [ ] **Run the calibration procedure** and record per-zone baseline / pressed /
+      crosstalk values; feed them in via `SAFEBATH_MAT_ZONE_CALIBRATION`. There is
+      no trained four-zone fall model — the fall path is rule-based by design.
 
 ### Board 2 — Radar (`radar_node.ino`)
 - [ ] Serial: walk in/out → presence/motion flip; stand still 2 min →
@@ -80,9 +87,11 @@ do Step 1, then flip back.
       design — they will NOT page anyone (Master Guide §7/§8).
 
 ### Board 4 — Audio (`audio_node.ino`)
-- [ ] Serial: clap → impact_thud; pour water nearby → water; speak loudly →
-      speech_or_cry; quiet room → silence. Three scenarios, three labels,
-      reliably, before proceeding.
+- [ ] Serial: clap → `impact_thud`; pour water nearby → `water_sound`; speak
+      loudly → `cry_or_scream`/`ordinary_speech`; quiet room → `silence` (or
+      `background_noise`). Use these six labels only — the edge rejects any
+      other string with HTTP 400 `invalid_payload` (the old 4-class
+      `water`/`speech_or_cry` labels will fail; reflash this sketch).
 - [ ] HTTP: `{"label":..., "energy":...}` ~5 Hz reaches the audio telemetry feed.
 - [ ] Cross-board check (Phase E pair): POST a manual trigger —
       ```
@@ -120,8 +129,8 @@ With all 5 boards powered and pointed at the Pi:
       which one).
 - [ ] Stop the mock publisher if it was running (`mock_publisher.py`) — real
       data replaces simulated data with zero code changes.
-- [ ] Dashboard Live mode: all module cards show REAL values, heatmap animates
-      from the actual Velostat scan, event log fills.
+- [ ] Dashboard Live mode: all module cards show REAL values, the Board-1
+      four-zone card animates from the actual zone readings, event log fills.
 - [ ] One deliberate danger trigger end-to-end (e.g. cover all 3 ToF):
       card turns alert color → log entry → DFPlayer asks → say nothing →
       caretaker PWA gets a push (set `SUPABASE_URL` + `VAPID_*` keys in

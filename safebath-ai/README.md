@@ -32,11 +32,11 @@ message_type`) defined in `firmware/common/SafeBathTelemetry.h`.
 
 | Board | HTTP call (message_type `module`) | Payload |
 |---|---|---|
-| 1 Mat | `POST /api/v1/telemetry` `mat` | `{"values": [72 ints]}` (12x6 row-major, 12-bit 0-4095 @10Hz) |
+| 1 Mat | `POST /api/v1/telemetry` `mat` | **Primary:** `{"sensor_type": "pressure_4zone", "zones": [4 readings]}` (2×2 four-zone, raw 12-bit ADC 0-4095 @10Hz). Legacy grid only: `{"values": [72 ints]}` (12x6 row-major) |
 | 1 Mat PIR | `POST /api/v1/event` `mat` | `{"entry": true}` |
 | 2 Radar | `POST /api/v1/telemetry` `radar` | `{"presence": bool, "motion": bool, "stillness_ms": int, "possible_collapse": bool}` @2Hz |
 | 3 Toilet | `POST /api/v1/telemetry` `toilet` | `{"gas_ppm": float, "voc_ppm": float, "turbidity": float, "hour_of_day": int}` every 2s (`temp_c` optional — pending DS18B20 decision) |
-| 4 Audio | `POST /api/v1/telemetry` `audio` | `{"label": "silence"\|"water"\|"impact_thud"\|"speech_or_cry", "energy": float}` ~5Hz |
+| 4 Audio | `POST /api/v1/telemetry` `audio` | `{"label": "silence"\|"background_noise"\|"impact_thud"\|"cry_or_scream"\|"ordinary_speech"\|"water_sound", "energy": float}` ~5Hz |
 | 5 ToF/Thermal | `POST /api/v1/telemetry` `tof` | `{"avg_thermal_c": float, "flow_pulses": int, "tof_collapse": bool, "unattended_hot_fill": bool}` ~3Hz |
 | 5 Voice trigger | `POST /api/v1/event` `tof` | `{"prompt": "are_you_ok"}` |
 | 5 Voice play | `GET /api/v1/voice/pending?device_id=tof-01&role=play` | claims the prompt to speak it aloud (DFPlayer) |
@@ -56,7 +56,7 @@ Kept verbatim from SOFTWARE_BUILD_SPEC.md Section 4 so nobody re-derives this:
 
 | # | Module | Original planned model (ideal hardware) | **Actual model to implement now** (confirmed hardware) | Why it changed |
 |---|---|---|---|---|
-| 1 | Fall Risk | Spatiotemporal CNN on a 32×32 Velostat grid → Frailty Index | **ConvLSTM2D on an 8×8 grid** (now **12×6**, 72 cells, per final wiring), 3-class (normal/unsteady/fall) | Confirmed mux/shift-register setup reads a coarser grid; ConvLSTM still captures the sway trajectory that matters |
+| 1 | Fall Risk | Spatiotemporal CNN on a 32×32 Velostat grid → Frailty Index | **Rule-based across the 2×2 four-zone mat + radar/ToF/audio** (no trained four-zone fall model yet). A legacy **ConvLSTM2D on a 12×6 grid** (72 cells) is retained for the old artifact only | Prototype mat is four zones; the grid ConvLSTM is incompatible and never fed zone data, so fall escalation uses radar stillness + ToF + audio |
 | 2 | Cardiac/Presence | LSTM on mmWave micro-Doppler → HR/RR anomaly | **Rule-based: presence + stillness-duration threshold** | C4001 exposes presence/motion booleans, not raw Doppler/vitals data |
 | 3 | Toilet Biomarkers | Random Forest / SVM fusion on gas + optical + thermal + frequency | **Random Forest on tabular features** (gas_ppm, voc_ppm, turbidity) | Final wiring has no toilet-side thermal sensor; DS18B20 dropped |
 | 4 | Acoustic Distress | MobileNetV2 on Mel-spectrograms → later YAMNet embeddings | **RMS/ZCR/spectral-centroid features → tiny dense net or thresholds** (Master Guide §5.1) | MAX4466 is analog — YAMNet/I2S approach no longer applies; features computed identically in firmware and training |
@@ -150,9 +150,9 @@ frame shape and the mat parser (12×6 = 72 values) will ignore it.
 
 ## Four-zone pressure mat (2×2)
 
-The prototype can run a four-zone Velostat mat instead of the 12×6 grid. The
-four zones are independent electrode pairs laid out 2×2 (Zone 1 top-left,
-Zone 2 top-right, Zone 3 bottom-left, Zone 4 bottom-right).
+The prototype is a four-zone Velostat mat (2×2). The four zones are independent
+electrode pairs laid out 2×2 (Zone 1 top-left, Zone 2 top-right, Zone 3 bottom-left,
+Zone 4 bottom-right). A 12×6 grid is retained only for legacy compatibility.
 
 **Telemetry contract.** Four-zone frames use an explicit discriminator so they
 never go through the 72-cell check. They travel the SAME ingestion path as
@@ -182,20 +182,28 @@ and non-numeric values are rejected with HTTP 400 `invalid_payload` (recorded in
 device registration behave exactly as before. Legacy 72-cell frames are still
 accepted under `sensor/mat/frame` and historical events are untouched.
 
-**API.** `GET /api/latest` now also returns:
+**API.** `GET /api/latest` returns:
 - `mat_mode`: `"four_zone"` or `"grid"` (decided by the most recently inserted
-  mat event, so switching firmware flips the dashboard without deleting data),
-- `mat_zones`: `{sensor_type, zones[4], count, ts, calibration}` or `null`,
+  mat event id; defaults to `four_zone`),
+- `mat_zones`: latest four-zone frame `{sensor_type, zones[4], count, order, contract_version, ts, calibration}` or `null`,
+- `mat_zone_order`: canonical positional zone names,
+- `mat_zone_contract_version`: version of the four-zone semantics,
 - `mat_zone_recent`: recent four-zone frames.
-The legacy `mat_frame` / `mat_frames_recent` (72 values) stay available.
+The legacy `mat_frame` / `mat_frames_recent` (72 values) stay available (empty
+unless legacy frames exist). `mat_zones.calibration` reflects
+`SAFEBATH_MAT_ZONE_CALIBRATION` (opt-in).
 
-**Dashboard.** When `mat_mode == "four_zone"` the Board-1 card renders a
-responsive 2×2 grid (`frontend/matZones.mjs` → `MatZonesCard`) with a fixed
-label, the raw ADC reading, the normalized response % (only when calibrated),
-the state (No Pressure / Low / Medium / High), and a stale/offline/API-error
+**Dashboard.** The Board-1 card renders the 2×2 four-zone layout
+(`frontend/matZones.mjs` → `MatZonesCard`) by default in BOTH live and demo
+modes, with fixed labels, raw ADC per zone, normalized % (only when calibrated),
+state (No Pressure / Low / Medium / High), and a stale/offline/API-error
 indicator. Colors run cool (low) → intermediate (medium) → warm (high), with
-grey for unavailable/stale/uncalibrated. Otherwise the legacy 12×6 heatmap is
-shown unchanged, so a 72-cell frame can never render as four zones.
+grey for unavailable/stale/uncalibrated. The legacy 12×6 heatmap is reachable
+only via an explicit "legacy 12×6" toggle; if the backend reports legacy grid
+frames while in the default view, the card shows an explicit notice instead of
+mis-drawing them as four zones. Live mode never substitutes demo values when the
+API fails — it clears the simulated snapshot on entry and shows an unavailable
+state.
 
 **Calibration / normalization.** Percentages are opt-in. Without calibration the
 card shows raw ADC and an explicit "Uncalibrated" state (no invented values).
@@ -211,7 +219,10 @@ Supply per-zone calibration via env (inline JSON or a file):
 `baseline` = no-pressure ADC, `max` = full-response ADC, `polarity` =
 `"increase"` (reading rises with pressure) or `"decrease"` (reading falls);
 per-zone `polarity` overrides the global default. Band defaults live in
-`frontend/matZones.mjs` (`< 25` Low, `< 60` Medium, else High).
+`frontend/matZones.mjs` (`< 25` Low, `< 60` Medium, else High). The full
+measurement procedure (baseline, press, crosstalk, noise, thresholds) is in
+**[docs/mat_zone_calibration.md](docs/mat_zone_calibration.md)** — do not invent
+calibration numbers.
 
 **Fusion / alerts.** `sensor/mat/zones` frames are recorded but the 72-cell
 rule-based grid heuristics (sustained-pressure sum, CoP centroid jump) are
@@ -219,12 +230,19 @@ explicitly NOT reused for four zones. The scald interlock can opt in to a
 four-zone "pressure present" signal with
 `SAFEBATH_MAT_ZONE_PRESSURE_SUM_ADC` (default `0` = disabled).
 
-**Firmware.** `firmware/mat_node/mat_node.ino` has `MAT_ZONE_MODE` (default `0`
-= legacy 12×6). Set it to `1` to emit four-zone frames. **This is not yet
-hardware-validated**: `MAT_ZONE_CHANNELS` is a placeholder CD4067 channel map
-that must be matched to the physical build, and a single `analogRead` per zone
-must be confirmed to track pressure before it is trusted. GPIO assignments and
-the HTTP/boot-id/sequence contract are unchanged.
+**Firmware.** `firmware/mat_node/mat_node.ino` has `MAT_ZONE_MODE` (default `1`
+= four-zone). Set it to `0` to emit legacy 12×6 frames. The four zones are read
+directly on four ESP32 ADC1 inputs (`MAT_ZONE_ADC_PINS`, a **proposed**
+`{34,35,32,33}` map) as voltage dividers, with oversampling per zone; each zone
+is an independent electrode pair, so the CD4067/74HC595 scanner is not used in
+this mode. **This is not yet hardware-validated**: you must match
+`MAT_ZONE_ADC_PINS` and `MAT_ZONE_POLARITY_INCREASE` to the real build before the
+readings mean anything. A signal-side divider (the reference image suggests
+10 kΩ) is not a complete circuit spec — measure your divider, and never drive a
+high-current load from GPIO. The mat only ever sits on an ADC input. GPIO for PIR
+(27), the Wi-Fi config, `mat-01` identity, HTTP transport, boot-id and sequence
+validation are unchanged. See **[docs/mat_zone_calibration.md](docs/mat_zone_calibration.md)**
+for the full record-baseline / press / crosstalk / threshold procedure.
 
 ## Caretaker PWA (push + offline acks)
 

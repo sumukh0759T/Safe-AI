@@ -1,5 +1,12 @@
 """
-Module 1 — Fall Risk ConvLSTM on the confirmed 12x6 pressure grid.
+LEGACY Module 1 — Fall Risk ConvLSTM on the OLD 12x6 pressure grid.
+
+INCOMPATIBLE WITH THE FOUR-ZONE MAT. The active mat is a 2x2 four-zone
+Velostat sensor producing four readings per frame (Pressure4ZonePayload). This
+model requires a (20, 12, 6) grid and must NEVER be fed four-zone data (the
+fusion engine does not do so — see the sensor/mat/zones branch, which uses the
+explicit rule-based fallback instead). Retrain only if a genuinely four-zone
+model is designed and evaluated.
 
 Input : data/synthetic/mat_synth_X.npy  (N, 20, ROWS=16, COLS=4), labels 0/1/2
 Arch  : Reshape -> ConvLSTM2D(8,(3,3)) -> Flatten -> Dense(16 relu) -> Dense(3 softmax)

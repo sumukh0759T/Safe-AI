@@ -4,10 +4,14 @@ Pydantic models mirroring the FINAL MQTT data contract
 Section 2 where they differ).
 
 Differences vs the older spec, all deliberate:
- - mat frame is a 72-int CSV, 12 rows x 6 cols (row-major), per final wiring
- - four-zone mat is a separate payload (Pressure4ZonePayload, exactly 4
-   non-negative finite readings) on its own topic so it never runs through the
-   72-cell length check; legacy 72-cell frames remain fully supported
+ - the mat is a four-zone Velostat sensor (2x2). A frame is exactly four
+   finite, non-negative readings in the documented MAT_ZONE_ORDER
+   (zone_1_top_left, zone_2_top_right, zone_3_bottom_left,
+   zone_4_bottom_right). It travels as Pressure4ZonePayload on its own topic
+   (MAT_ZONE_TOPIC) so it never runs through a 72-cell length check.
+ - a LEGACY 12x6 / 72-cell grid frame (MatFramePayload) is still accepted
+   under "sensor/mat/frame" for explicit backward compatibility only; it is a
+   separate, versioned shape and is never padded to or from four-zone data
  - toilet reading has NO temp_c (DS18B20 not in final wiring); kept optional
    so re-adding it later is a one-line change (Master Guide Section 12.1)
  - audio events are JSON {"label", "energy"} — MAX4466 is analog, energy is
@@ -34,6 +38,19 @@ ADC_MAX = 4095         # 12-bit ESP32 ADC
 MAT_ZONE_COUNT = 4
 MAT_ZONE_TOPIC = "sensor/mat/zones"    # distinct legacy topic for zone frames
 MAT_ZONE_SENSOR_TYPE = "pressure_4zone"
+# Canonical, documented zone order (the single source of truth). A frame's four
+# readings are positional and MUST be sent in exactly this order. The frontend
+# and every test import this so nothing can silently reorder the zones.
+MAT_ZONE_ORDER = (
+    "zone_1_top_left",
+    "zone_2_top_right",
+    "zone_3_bottom_left",
+    "zone_4_bottom_right",
+)
+# Version the four-zone contract independently of CONTRACT_VERSION so a future
+# change to zone semantics is an explicit, detectable break rather than a silent
+# reinterpretation of stored frames.
+MAT_ZONE_CONTRACT_VERSION = 1
 
 
 class StrictModel(BaseModel):

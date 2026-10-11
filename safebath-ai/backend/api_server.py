@@ -7,10 +7,14 @@ Run:  uvicorn backend.api_server:app --reload --port 8000
 Response shape (superset of the spec — extra keys are additive, so the
 frontend contract stays stable):
   risk_score, band, state, modules{...}, events[...],
-  mat_frame {values[72], rows, cols}, mat_frames_recent[[72], ...]  (CoP trail)
-  mat_mode ("grid"|"four_zone"), mat_zones {zones[4], calibration, ts}|null,
+  mat_mode ("four_zone"|"grid"), mat_zone_order[4], mat_zone_contract_version,
+  mat_zones {zones[4], count, order, contract_version, calibration, ts}|null,
   mat_zone_recent[[4], ...]
+  mat_frame {values[72], rows, cols}, mat_frames_recent[[72], ...]  (LEGACY
+    compatibility only — empty unless old 12x6 grid firmware still reports)
   risk_history [{ts, score}]
+The four-zone mat (2x2 Velostat) is the primary shape; the 72-cell grid is a
+retained, explicitly-versioned legacy shape and is never reinterpreted as zones.
 If the DB is empty (bring-up day), a clearly-labeled mock seed is inserted once
 so Live mode demos end-to-end without hardware.
 """
@@ -28,7 +32,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.db import DEFAULT_DB, get_conn, init_db
 from backend.schemas import (MAT_CELL_COUNT, MAT_COLS, MAT_ROWS,
-                             MAT_ZONE_COUNT, MAT_ZONE_TOPIC)
+                             MAT_ZONE_CONTRACT_VERSION, MAT_ZONE_COUNT,
+                             MAT_ZONE_ORDER, MAT_ZONE_TOPIC)
 from backend.telemetry_store import init_telemetry
 
 from backend.caretaker_api import caretaker_app
@@ -203,13 +208,16 @@ def _mat_state(conn: sqlite3.Connection) -> dict:
     elif last_frame is not None:
         mode = "grid"
     else:
-        mode = "grid"
+        # The physical mat is the four-zone design: that is the default shape
+        # when no mat event exists at all (matches README + mat_zone_order).
+        mode = "four_zone"
 
     mat_zones = None
     recent = []
     if last_zone is not None:
         try:
-            parsed = json.loads(last_zone["payload"])
+            parsed = json.loads(
+                last_zone["payload"].replace("[mock-seed]", "").strip())
             zones = [float(z) for z in parsed["zones"]]
         except (ValueError, TypeError, KeyError):
             zones = None
@@ -218,6 +226,8 @@ def _mat_state(conn: sqlite3.Connection) -> dict:
                 "sensor_type": "pressure_4zone",
                 "zones": zones,
                 "count": MAT_ZONE_COUNT,
+                "order": list(MAT_ZONE_ORDER),
+                "contract_version": MAT_ZONE_CONTRACT_VERSION,
                 "ts": last_zone["ts"],
                 "calibration": _load_mat_zone_calibration(),
             }
@@ -225,7 +235,8 @@ def _mat_state(conn: sqlite3.Connection) -> dict:
                 "SELECT payload FROM events WHERE topic=? "
                 "ORDER BY id DESC LIMIT 24", (MAT_ZONE_TOPIC,)):
             try:
-                z = [float(x) for x in json.loads(r["payload"])["zones"]]
+                z = [float(x) for x in json.loads(
+                    r["payload"].replace("[mock-seed]", "").strip())["zones"]]
             except (ValueError, TypeError, KeyError):
                 continue
             if len(z) == MAT_ZONE_COUNT:
@@ -246,7 +257,8 @@ def _danger_level(topic: str, payload: str) -> str:
             (data.get("tof_collapse") or data.get("unattended_hot_fill")):
         return "danger"
     if topic == "sensor/audio/event":
-        if data.get("label") in ("impact_thud", "speech_or_cry"):
+        # 6-class audio label set (backend/schemas.AudioLabel)
+        if data.get("label") in ("impact_thud", "cry_or_scream"):
             return "warn"
         return "safe"
     if topic == "sensor/toilet/reading":
@@ -260,8 +272,10 @@ def _seed_mock_if_empty(conn: sqlite3.Connection) -> None:
         return
     now = time.time()
     seed = [
-        ("sensor/mat/frame",
-         ",".join(["120"] * (MAT_CELL_COUNT - 1) + ["2400"])),
+        # Four-zone mat seed (the active geometry). The legacy 12x6 grid is not
+        # seeded anymore; a legacy frame only appears if old firmware reports it.
+        ("sensor/mat/zones",
+         '{"sensor_type": "pressure_4zone", "zones": [120, 120, 120, 120]}'),
         ("sensor/mat/pir", '{"entry": true}'),
         ("sensor/radar/status",
          '{"presence": true, "motion": true, "stillness_ms": 0, '
@@ -295,15 +309,18 @@ def latest():
 
     modules = {}
     for mod_id, topic in MODULE_TOPICS:
-        row = conn.execute(
-            "SELECT payload FROM events WHERE topic=? ORDER BY id DESC LIMIT 1",
-            (topic,)).fetchone()
+        if mod_id == "mat":
+            # the mat may report either shape; the newest event wins
+            row = conn.execute(
+                "SELECT payload FROM events WHERE topic IN "
+                "('sensor/mat/zones','sensor/mat/frame')"
+                " ORDER BY id DESC LIMIT 1").fetchone()
+        else:
+            row = conn.execute(
+                "SELECT payload FROM events WHERE topic=? ORDER BY id DESC LIMIT 1",
+                (topic,)).fetchone()
         modules[mod_id] = {"value": row["payload"] if row else None,
                            "ts": None}
-
-    # raw 72-int CSV exactly as published on sensor/mat/frame, unmodified —
-    # the live heatmap's per-cell source of truth
-    modules["mat"]["raw_frame"] = modules["mat"]["value"]
 
     events = conn.execute(
         "SELECT ts, topic, payload FROM events ORDER BY id DESC LIMIT 10"
@@ -323,6 +340,10 @@ def latest():
             continue
     if recent_frames:
         mat_values = recent_frames[0]
+    # legacy 72-int CSV exactly as published on sensor/mat/frame, unmodified —
+    # only present when legacy grid firmware is still reporting
+    modules["mat"]["raw_frame"] = (
+        ",".join(str(v) for v in mat_values) if mat_values else None)
 
     history = [{"ts": h["ts"], "score": h["score"]} for h in conn.execute(
         "SELECT ts, score FROM risk_state ORDER BY id DESC LIMIT 60")]
@@ -340,6 +361,8 @@ def latest():
         "mat_frames_recent": list(reversed(recent_frames)),
         "mat_mode": mat_state["mode"],
         "mat_zones": mat_state["mat_zones"],
+        "mat_zone_order": list(MAT_ZONE_ORDER),
+        "mat_zone_contract_version": MAT_ZONE_CONTRACT_VERSION,
         "mat_zone_recent": mat_state["mat_zone_recent"],
         "risk_history": list(reversed(history)),
         # ---- additive fields (new client feature additions) ----------------

@@ -65,6 +65,82 @@ class TestAudio:
         assert c_thud < 500                        # thud centroid is low-freq
 
 
+class TestSimulatedAudioLabels:
+    """Regression guard: every simulated audio label must be a member of the
+    6-class contract (backend.schemas.AudioLabel). A stale pre-migration label
+    like "speech_or_cry" makes the edge reject the frame with HTTP 400
+    invalid_payload — which is exactly how a working node looks "broken"."""
+
+    def test_mock_publisher_audio_labels_are_contract_valid(self):
+        import json
+
+        from backend.mock_publisher import AUDIO_LABELS, audio_event
+        from backend.schemas import AudioEventPayload
+        allowed = set(__import__("typing").get_args(AudioEventPayload.model_fields[
+            "label"].annotation))
+        assert set(AUDIO_LABELS) <= allowed
+        for scenario in ("default", "collapse", "scald"):
+            for danger in (False, True):
+                for tick in range(0, 25):
+                    payload = json.loads(audio_event(danger, scenario, tick))
+                    assert payload["label"] in allowed, payload
+                    AudioEventPayload.model_validate(payload)
+
+    def test_demo_script_audio_labels_are_contract_valid(self):
+        import importlib.util
+        import json
+        import os
+
+        from backend.schemas import AudioEventPayload
+        path = os.path.join(os.path.dirname(__file__), "..", "demo_scripts",
+                            "demo_all_alerts.py")
+        spec = importlib.util.spec_from_file_location("demo_all_alerts", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        for topic, raw in mod.build_audio_distress(count=6):
+            if topic != "sensor/audio/event":
+                continue
+            AudioEventPayload.model_validate(json.loads(raw))
+
+
+class TestSimulatedMatZones:
+    """The simulated mat feed must emit the ACTIVE four-zone geometry (four
+    finite, non-negative readings), never a padded/legacy grid shape."""
+
+    def test_mock_publisher_mat_zones_are_contract_valid(self):
+        import json
+        import random
+
+        from backend.mock_publisher import mat_zones
+        from backend.schemas import MAT_ZONE_COUNT, Pressure4ZonePayload
+        random.seed(0)
+        for nobody in (False, True):
+            for danger in (False, True):
+                for _ in range(25):
+                    payload = json.loads(mat_zones(danger, nobody))
+                    p = Pressure4ZonePayload.model_validate(payload)
+                    assert p.sensor_type == "pressure_4zone"
+                    assert len(p.zones) == MAT_ZONE_COUNT == 4
+                    assert all(z >= 0 for z in p.zones)
+
+    def test_demo_script_mat_frames_are_contract_valid(self):
+        import importlib.util
+        import json
+        import os
+
+        from backend.schemas import Pressure4ZonePayload
+        path = os.path.join(os.path.dirname(__file__), "..", "demo_scripts",
+                            "demo_all_alerts.py")
+        spec = importlib.util.spec_from_file_location("demo_all_alerts", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        for builder in (mod.build_mat_pressure_frames, mod.build_thermal_scald):
+            for topic, raw in builder(count=4):
+                if topic != "sensor/mat/zones":
+                    continue
+                Pressure4ZonePayload.model_validate(json.loads(raw))
+
+
 def test_radar_stub_flag_index():
     """possible_collapse fires exactly when stillness_ms exceeds 120000."""
     first_true = None

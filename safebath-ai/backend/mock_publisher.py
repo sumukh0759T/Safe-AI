@@ -6,6 +6,10 @@ Publishes realistic, schema-correct MQTT traffic for all 5 boards, including
 periodic deliberate 'danger' spikes, so the entire pipeline — broker,
 mqtt_bridge, fusion_engine, alert_rules, api_server, frontend — can be built
 and self-tested end-to-end with zero physical hardware connected.
+
+The mat traffic is the ACTIVE four-zone (2x2) Velostat geometry: four raw ADC
+readings per frame on the legacy topic `sensor/mat/zones`. The old 12x6 / 72-cell
+grid is NOT simulated here — see docs/mat_zone_calibration.md.
 Swap this off (or just don't run it) once real boards are on the network;
 nothing downstream changes.
 
@@ -63,19 +67,27 @@ COLLAPSE_WINDOW_TICKS = 20      # > voice_wait_seconds/interval so timeout fires
 # --------------------------------------------------------------------------- #
 # payload builders (shapes match backend/schemas.py exactly)
 # --------------------------------------------------------------------------- #
-def mat_frame(danger=False, nobody=False):
-    """72 comma-separated ints, 12x6 row-major, 12-bit range.
+def mat_zones(danger=False, nobody=False):
+    """Four-zone Velostat frame (2x2) as JSON, for topic `sensor/mat/zones`.
+
+    Exactly four raw ADC readings in the canonical order
+    (zone_1_top_left, zone_2_top_right, zone_3_bottom_left, zone_4_bottom_right,
+    see backend/schemas.MAT_ZONE_ORDER). Synthetic raw ADC counts — never
+    calibrated pressure/force.
 
     nobody=True models an empty bathroom (scald scenario): calm noise floor
     even while the tap runs — that absence-of-pressure is what lets
-    cross_modal.scald_shutoff_confirmed pass."""
-    from backend.schemas import MAT_CELL_COUNT
+    cross_modal.scald_shutoff_confirmed pass. danger=True models a broad
+    body-down press across all four zones (recorded, but NOT treated as proof
+    of a fall — see fusion_engine's sensor/mat/zones branch)."""
+    from backend.schemas import MAT_ZONE_COUNT
     if nobody:
-        vals = [random.randint(0, 400) for _ in range(MAT_CELL_COUNT)]
+        zones = [random.randint(0, 200) for _ in range(MAT_ZONE_COUNT)]
+    elif danger:
+        zones = [random.randint(2600, 3800) for _ in range(MAT_ZONE_COUNT)]
     else:
-        vals = [random.randint(2800, 3800) if danger else random.randint(0, 400)
-                for _ in range(MAT_CELL_COUNT)]
-    return ",".join(map(str, vals))
+        zones = [random.randint(0, 400) for _ in range(MAT_ZONE_COUNT)]
+    return json.dumps({"sensor_type": "pressure_4zone", "zones": zones})
 
 
 def mat_pir(entry=None):
@@ -103,9 +115,13 @@ def toilet_reading(danger=False):
 def audio_event(danger=False, scenario="default", tick_in_window=0):
     if danger:
         if scenario == "collapse":
-            # confirmed thud early in window, then sustained distress call
+            # confirmed thud early in window, then sustained distress call.
+            # NOTE: must be one of backend.schemas.AudioLabel (6-class
+            # contract) — the pre-6-class "speech_or_cry" label is rejected
+            # with HTTP 400 invalid_payload, which is what made the simulated
+            # audio feed look like a broken node.
             label = ("impact_thud" if tick_in_window < 3
-                     else "speech_or_cry")
+                     else "cry_or_scream")
             energy = 0.9 if label == "impact_thud" else 0.55
         else:
             # NOTE: guide's default spike pairs impact_thud with motion=False,
@@ -170,8 +186,8 @@ class MockPublisher:
                   f"(scenario={self.scenario})")
 
         tw = self.tick - self.danger_onset_tick if self.danger_onset_tick is not None else 99
-        self.publish("sensor/mat/frame",
-                     mat_frame(danger, nobody=self.scenario == "scald"))
+        self.publish("sensor/mat/zones",
+                     mat_zones(danger, nobody=self.scenario == "scald"))
         if self.tick % 5 == 0:                       # PIR occasionally
             self.publish("sensor/mat/pir", mat_pir())
         self.publish("sensor/radar/status", radar_status(danger, self.scenario))

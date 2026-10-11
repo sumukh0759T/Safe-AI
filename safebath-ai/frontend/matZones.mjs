@@ -27,11 +27,15 @@ import React from "react";
 export const ZONE_COUNT = 4;
 
 export const ZONE_META = [
-  { id: 1, label: "Zone 1 — Top Left", short: "Top Left" },
-  { id: 2, label: "Zone 2 — Top Right", short: "Top Right" },
-  { id: 3, label: "Zone 3 — Bottom Left", short: "Bottom Left" },
-  { id: 4, label: "Zone 4 — Bottom Right", short: "Bottom Right" },
+  { id: 1, key: "zone_1_top_left", label: "Zone 1 — Top Left", short: "Top Left" },
+  { id: 2, key: "zone_2_top_right", label: "Zone 2 — Top Right", short: "Top Right" },
+  { id: 3, key: "zone_3_bottom_left", label: "Zone 3 — Bottom Left", short: "Bottom Left" },
+  { id: 4, key: "zone_4_bottom_right", label: "Zone 4 — Bottom Right", short: "Bottom Right" },
 ];
+
+// Canonical positional order of a four-zone frame. Must equal the backend's
+// backend.schemas.MAT_ZONE_ORDER; a test asserts the two never drift apart.
+export const ZONE_ORDER = ZONE_META.map((z) => z.key);
 
 // Percent thresholds for the qualitative bands (kept in one reviewable place).
 export const DEFAULT_BANDS = { low: 25, medium: 60 };
@@ -170,14 +174,39 @@ export function buildZoneCells(zones, calibration, opts = {}) {
 }
 
 /*
- * Which mat visualization to show. Fails safe to the legacy grid unless the
- * backend explicitly reports four-zone mode, so 72-cell telemetry can never be
- * mistaken for a 2x2 mat.
+ * Which mat SHAPE the snapshot actually carries.
+ *
+ * The physical mat is the 2x2 four-zone design, so four-zone is the default.
+ * The 12x6 grid is only reported when the snapshot explicitly says so, either
+ * via mat_mode === "grid" or by carrying 72-cell frames and no four-zone
+ * frame. A 72-cell frame is never reinterpreted as four-zone data.
  */
 export function matModeFromSnapshot(snap) {
-  if (!snap) return "grid";
+  if (!snap) return "four_zone";
+  if (snap.mat_mode === "grid") return "grid";
   if (snap.mat_mode === "four_zone") return "four_zone";
-  return "grid";
+  const zones = snap.mat_zones && snap.mat_zones.zones;
+  const hasZones = Array.isArray(zones) && zones.length === ZONE_COUNT;
+  const values = snap.mat_frame && snap.mat_frame.values;
+  const hasLegacy = Array.isArray(values) && values.length === 72;
+  if (hasZones) return "four_zone";
+  if (hasLegacy) return "grid";
+  return "four_zone";
+}
+
+/*
+ * Is this snapshot simulated data? Used by the System truth strip so LIVE mode
+ * can never be labelled as live hardware while showing demo values. The mock
+ * snapshot carries `_mock: true`; anything else defaults by mode (a snapshot
+ * without provenance shown in live mode is treated as real only when the API
+ * actually said source==="real").
+ */
+export function snapshotIsSimulated(snap, mode) {
+  if (!snap) return mode !== "live";
+  if (snap._mock === true) return true;
+  if (snap.source === "real") return false;
+  if (snap.source === "simulated") return true;
+  return mode !== "live";
 }
 
 const h = React.createElement;

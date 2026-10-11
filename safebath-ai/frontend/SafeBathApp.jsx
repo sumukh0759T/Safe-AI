@@ -10,14 +10,14 @@
  * <meta name="safebath-api-base">, or ?api=... query param.
  * Response shape is documented in that file; extra keys are additive.
  *
- * Board-1 card implements Master Guide Section 2.4 visualizations #1-#3:
- *   1. live 12x6 Velostat heatmap (blue -> red)
- *   2. numeric ADC overlay toggle (calibration sessions)
- *   3. center-of-pressure trail (the sway trajectory ConvLSTM learns from)
+ * Board-1 is the 2x2 FOUR-ZONE Velostat mat and renders the four-zone card in
+ * both LIVE and DEMO modes (raw ADC per zone + optional normalized %). The old
+ * 12x6 grid heatmap / CoP trail is a LEGACY compatibility view only, reachable
+ * behind the explicit "legacy 12×6" toggle, and is never shown by default.
  */
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { healthFailureMessage, resolveApiBase, resolveApiInfo } from "./apiBase.mjs";
-import { MatZonesCard, matModeFromSnapshot } from "./matZones.mjs";
+import { MatZonesCard, matModeFromSnapshot, snapshotIsSimulated } from "./matZones.mjs";
 
 const API_BASE = resolveApiBase();
 const API_INFO = resolveApiInfo();
@@ -115,6 +115,28 @@ const MOCK_ZONE_CALIBRATION = {
   ],
 };
 
+/* Live mode must NEVER display simulated values. Start from an explicitly
+ * empty, non-mock snapshot and only ever fill it from real API responses; if
+ * the API is unreachable the cards show their unavailable state rather than
+ * quietly reusing the demo generator. */
+function makeEmptyLiveSnapshot() {
+  return {
+    _mock: false,
+    source: "real",
+    modules: {},
+    mat_mode: null,
+    mat_zones: null,
+    mat_zone_recent: [],
+    mat_frame: null,
+    mat_frames_recent: [],
+    events: [],
+    risk_score: 0,
+    band: "normal",
+    alert_state: "resolved",
+    risk_history: [],
+  };
+}
+
 function makeMockSnapshot() {
   const t = Date.now() / 1000;
   const phase = Math.floor(t / 20) % 4;             // cycles normal/unsteady/fall/water
@@ -211,7 +233,7 @@ function MatViewToggle({ value, onChange }) {
     <div style={{ display: "flex", gap: 6, marginBottom: 10, alignItems: "center" }}>
       <span style={{ fontSize: 11, color: "#64748b" }}>view:</span>
       {btn("four_zone", "4-zone")}
-      {btn("grid", "72-cell grid")}
+      {btn("grid", "legacy 12×6")}
       {btn("auto", "auto")}
     </div>
   );
@@ -268,7 +290,7 @@ function MatCard({ frameValues, recentFrames, headerExtra }) {
   }, [frameValues, recentFrames, overlay]);
 
   return (
-    <Card title="Board 1 — Pressure Mat" subtitle="sensor/mat/frame · 12×6 · ConvLSTM fall-risk"
+    <Card title="Board 1 — Pressure Mat (LEGACY)" subtitle="sensor/mat/frame · 12×6 grid · compatibility view only"
       danger={false}>
       {headerExtra}
       <canvas ref={canvasRef} width={MAT_COLS * cellW} height={MAT_ROWS * cellH}
@@ -437,8 +459,7 @@ function SystemTruth({ snap, mode }) {
   const pending = (Number(outbox.queued) || 0) + (Number(outbox.failed) || 0) +
     (Number(outbox.in_flight) || 0) + (Number(outbox.pending) || 0);
 
-  const source = snap.source || (mode === "live" ? "real" : "simulated");
-  const simulated = source !== "real";
+  const simulated = snapshotIsSimulated(snap, mode);
   const activeEmg = Number(counts.active) || 0;
 
   let cloudText, cloudColor;
@@ -526,6 +547,7 @@ function SafeBathAppInner() {
   useEffect(() => {
     if (mode !== "live") return undefined;
     let alive = true;
+    setSnap(makeEmptyLiveSnapshot());   // drop demo values the moment LIVE starts
     const poll = async () => {
       try {
         const res = await fetch(LIVE_URL, { cache: "no-store" });
@@ -555,6 +577,7 @@ function SafeBathAppInner() {
   /* Mock ticking */
   useEffect(() => {
     if (mode !== "mock") return undefined;
+    setSnap(makeMockSnapshot());
     const id = setInterval(() => setSnap(makeMockSnapshot()), 1000);
     return () => clearInterval(id);
   }, [mode]);
@@ -584,13 +607,14 @@ function SafeBathAppInner() {
   const audio = mode === "live" ? parseJsonSafe(snap.modules?.audio?.value) : snap.audio;
   const tof = mode === "live" ? parseJsonSafe(snap.modules?.tof?.value) : snap.tof;
 
-  /* Four-zone mat: which layout to draw. `auto` follows the backend (live) or
-   * the simulated snapshot (mock); the toggle can force either view. Legacy
-   * 72-cell telemetry is never mistaken for a 2x2 mat under `auto`. */
-  const detectedMatMode = mode === "live"
-    ? matModeFromSnapshot(snap)
-    : (snap.mat_mode === "four_zone" ? "four_zone" : "grid");
-  const matMode = matView === "auto" ? detectedMatMode : matView;
+  /* The physical mat is the 2x2 four-zone design, so that is the default
+   * Board-1 view in BOTH modes. `auto` resolves to four-zone; the legacy 12x6
+   * grid is shown only when the operator explicitly selects it. A snapshot
+   * carrying only legacy 72-cell data raises an explicit notice instead of
+   * being drawn as four zones. */
+  const detectedMatMode = matModeFromSnapshot(snap);
+  const matMode = matView === "grid" ? "grid" : "four_zone";
+  const legacyNotice = matMode === "four_zone" && detectedMatMode === "grid";
   const matDevice = Array.isArray(snap.devices)
     ? snap.devices.find((d) => d.device_id === "mat-01" || d.module === "mat")
     : null;
@@ -675,6 +699,17 @@ function SafeBathAppInner() {
             subtitle="sensor/mat/zones · 2×2 four-zone · raw ADC per zone"
             danger={false}>
             {matToggle}
+            {legacyNotice && (
+              <div style={{
+                fontSize: 11, color: "#fde68a", background: "#422006",
+                border: "1px solid #78350f", borderRadius: 8,
+                padding: "6px 8px", marginBottom: 8, lineHeight: 1.4,
+              }}>
+                Legacy 12×6 grid frames detected — these are NOT four-zone data,
+                so they are not drawn as zones. Switch the view to “legacy 12×6”
+                if you need to inspect them.
+              </div>
+            )}
             <MatZonesCard
               zones={snap.mat_zones?.zones}
               calibration={snap.mat_zones?.calibration}

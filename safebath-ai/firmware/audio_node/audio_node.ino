@@ -5,8 +5,13 @@
  * Wiring = Master Guide Section 1 (Board 4): MAX4466 OUT -> GPIO34 (ADC1).
  *
  * Publishes the Section 3 contract ~5 Hz:
- *   sensor/audio/event : {"label": "silence"|"water"|"impact_thud"|
- *                         "speech_or_cry", "energy": float}
+ *   sensor/audio/event : {"label": "silence"|"background_noise"|
+ *                         "impact_thud"|"cry_or_scream"|"ordinary_speech"|
+ *                         "water_sound", "energy": float}
+ *   The six labels MUST equal backend/schemas.py AudioLabel exactly — any
+ *   other string is rejected by the edge with HTTP 400 invalid_payload.
+ *   (The pre-migration 4-class set — "water"/"speech_or_cry" — is what makes an
+ *   audio node that still runs old firmware look broken; reflash this sketch.)
  *
  * Feature extraction per Master Guide Section 5.1 — RMS, zero-crossing rate,
  * spectral centroid from a 256-point FFT. These MUST match

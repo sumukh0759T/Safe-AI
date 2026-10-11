@@ -4,7 +4,8 @@ SafeBath AI -- Full-Module Alert Demo Script
 Runs through all 6 alert scenarios sequentially so you can show judges
 the complete pipeline working end-to-end:
 
-  1. MAT FALL     -- sustained high pressure + CoP jump -> fall_risk
+  1. MAT PRESSURE -- four-zone (2x2) pressure frames, recorded only (a zone
+                    activating is NOT treated as proof of a fall)
   2. RADAR COLLAPSE -- motionless + presence -> possible_collapse
   3. THERMAL SCALD  -- hot water + nobody on mat -> scald_shutoff
   4. AUDIO DISTRESS -- impact thud + radar confirm -> acoustic_distress
@@ -31,8 +32,6 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend.schemas import MAT_CELL_COUNT
-
 MQTT_HOST = "localhost"
 MQTT_PORT = 1883
 
@@ -58,18 +57,18 @@ def make_direct_writer(db_path="data/events.db"):
     return conn, on_message
 
 # -- Scenario builders ------------------------------------------------
-def build_mat_fall_frames(count=25):
-    """72 cells all high (sustained) + one frame with CoP shift (centroid jump)."""
+def build_mat_pressure_frames(count=25):
+    """Four-zone Velostat frames (2x2), broad pressure on all four zones.
+
+    By design this is RECORDED ONLY and does NOT raise fall_risk: a single zone
+    (or even all four) activating is not proof of a fall, and there is no
+trained four-zone fall model yet. In this demo the mat-derived escalation
+    comes from radar/ToF/audio (scenarios 2, 4 and 6)."""
     frames = []
-    for i in range(count):
-        if i == 15:
-            # CoP jump: spike pressure on one side
-            high = MAT_CELL_COUNT // 4
-            vals = [random.randint(200, 400)] * (MAT_CELL_COUNT - high) \
-                + [random.randint(3200, 4000)] * high
-        else:
-            vals = [random.randint(3000, 3900)] * MAT_CELL_COUNT
-        frames.append(("sensor/mat/frame", ",".join(map(str, vals))))
+    for _ in range(count):
+        zones = [random.randint(2600, 3800) for _ in range(4)]
+        frames.append(("sensor/mat/zones", json.dumps(
+            {"sensor_type": "pressure_4zone", "zones": zones})))
     return frames
 
 def build_radar_collapse(count=10):
@@ -89,9 +88,10 @@ def build_thermal_scald(count=8):
     """Hot water + nobody on mat -> scald path."""
     frames = []
     for i in range(count):
-        # Empty mat (nobody)
-        mat_vals = [random.randint(0, 200)] * MAT_CELL_COUNT
-        frames.append(("sensor/mat/frame", ",".join(map(str, mat_vals))))
+        # Empty four-zone mat (nobody) -> no pressure present
+        zones = [random.randint(0, 200) for _ in range(4)]
+        frames.append(("sensor/mat/zones", json.dumps(
+            {"sensor_type": "pressure_4zone", "zones": zones})))
         # Hot thermal + flow
         thermal = json.dumps({
             "avg_thermal_c": 42.0 + random.uniform(-0.3, 0.3),
@@ -118,7 +118,10 @@ def build_audio_distress(count=10):
         if i < 2:
             label, energy = "impact_thud", 0.9
         else:
-            label, energy = "speech_or_cry", 0.6
+            # 6-class audio contract (backend/schemas.AudioLabel): sustained
+            # distress is cry_or_scream; the old "speech_or_cry" label is
+            # rejected with HTTP 400 invalid_payload.
+            label, energy = "cry_or_scream", 0.6
         audio = json.dumps({"label": label, "energy": energy})
         frames.append(("sensor/audio/event", audio))
     return frames
@@ -160,9 +163,9 @@ def build_tof_collapse(count=10):
 import random
 
 SCENARIOS = [
-    ("1. MAT FALL (fall_risk)",
-     "Sustained high pressure on mat -> ConvLSTM detects fall + CoP jump",
-     build_mat_fall_frames),
+    ("1. MAT PRESSURE (four-zone, recorded)",
+     "Broad pressure on all four zones -> recorded; NOT treated as a fall",
+     build_mat_pressure_frames),
 
     ("2. RADAR COLLAPSE (possible_collapse)",
      "Motionless person detected by radar for 30+ seconds",
