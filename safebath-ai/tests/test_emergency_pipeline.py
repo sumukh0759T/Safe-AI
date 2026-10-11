@@ -293,7 +293,7 @@ def test_voice_endpoints_roundtrip(tmp_db, monkeypatch):
 
     # a second claim finds nothing (the request is leased)
     assert client.get("/api/v1/voice/pending?device_id=audio-02"
-                      ).json()["has_request"] is False
+                      ).status_code == 403
 
     # Board 5 (speaker) claims the same request to play, independently
     play = client.get("/api/v1/voice/pending?device_id=tof-01&role=play").json()
@@ -318,6 +318,30 @@ def test_voice_endpoints_roundtrip(tmp_db, monkeypatch):
     finally:
         conn.close()
     assert req["reply"] == "fine"
+
+
+def test_voice_pending_checks_configured_device_token(tmp_db, monkeypatch):
+    pytest.importorskip("fastapi")
+    TestClient = pytest.importorskip("fastapi.testclient").TestClient
+    import backend.api_server as api
+    import backend.ingestion_api as ing
+    from backend.device_manager import Device, device_manager
+
+    monkeypatch.setattr(api, "DB_PATH", tmp_db)
+    monkeypatch.setattr(ing, "DB_PATH", tmp_db)
+    monkeypatch.setitem(
+        device_manager.devices, "tof-01",
+        Device("tof-01", "tof", "Voice Output", token="test-node-token"))
+    client = TestClient(api.app)
+    url = "/api/v1/voice/pending?device_id=tof-01&role=play"
+
+    assert client.get(url).status_code == 403
+    assert client.get(url, headers={"X-Node-Token": "wrong"}).status_code == 403
+    assert client.get("/api/v1/voice/pending?device_id=audio-01&role=play",
+                      headers={"X-Node-Token": "test-node-token"}).status_code == 403
+    accepted = client.get(url, headers={"X-Node-Token": "test-node-token"})
+    assert accepted.status_code == 200
+    assert accepted.json() == {"has_request": False}
 
 
 def test_config_endpoint_is_secret_free(tmp_db, monkeypatch):

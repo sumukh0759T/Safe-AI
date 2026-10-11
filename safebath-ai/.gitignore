@@ -30,5 +30,8 @@ frontend/dist/
 # per-machine API override — see frontend/config.example.js
 frontend/config.local.js
 
+# Module 5 device auth token (copy the example, never commit the local file)
+firmware/tof_thermal_voice_node/Module5Credentials.local.h
+
 # keep directory structure
 !**/.gitkeep

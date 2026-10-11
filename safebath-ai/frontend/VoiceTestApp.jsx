@@ -35,7 +35,7 @@ function StatusPill({ state }) {
   return <span role="status" aria-live="polite" style={{ ...styles.pill, background: colors[0], color: colors[1] }}>{state}</span>;
 }
 
-export default function VoiceTestApp() {
+export default function VoiceTestApp({ embedded = false }) {
   const [token, setToken] = useState("");
   const [backend, setBackend] = useState({ label: "Not checked", tone: "muted" });
   const [state, setState] = useState("Idle");
@@ -47,6 +47,9 @@ export default function VoiceTestApp() {
   const [interim, setInterim] = useState("");
   const [listeningSupported, setListeningSupported] = useState(true);
   const [synthesisSupported, setSynthesisSupported] = useState(true);
+  const [microphoneStatus, setMicrophoneStatus] = useState("");
+  const [draft, setDraft] = useState("");
+  const [shareWithCaretaker, setShareWithCaretaker] = useState(true);
   const recognitionRef = useRef(null);
   const activeRef = useRef(true);
   const intentionalStopRef = useRef(false);
@@ -123,7 +126,7 @@ export default function VoiceTestApp() {
           Authorization: `Bearer ${token}`,
           Accept: "application/json",
         },
-        body: JSON.stringify({ session_id: sessionId, text }),
+        body: JSON.stringify({ session_id: sessionId, text, share_with_caretaker: shareWithCaretaker }),
         signal: aborter.signal,
       });
       if (!response.ok) throw new Error(errorForStatus(response.status));
@@ -164,6 +167,57 @@ export default function VoiceTestApp() {
         // The next successful turn or explicit action sets the visible state.
       }
     }
+  }
+
+  async function checkMicrophone() {
+    setError("");
+    setMicrophoneStatus("Checking microphone…");
+    let stream;
+    let context;
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error("Microphone access needs a secure page (HTTPS or localhost) and a supported browser.");
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) {
+        setMicrophoneStatus("Microphone permission granted. Browser audio-level check is unavailable.");
+        return;
+      }
+      context = new AudioContextClass();
+      const source = context.createMediaStreamSource(stream);
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+      const samples = new Uint8Array(analyser.fftSize);
+      let peak = 0;
+      const until = Date.now() + 900;
+      while (Date.now() < until) {
+        analyser.getByteTimeDomainData(samples);
+        let sum = 0;
+        for (const sample of samples) sum += (sample - 128) ** 2;
+        peak = Math.max(peak, Math.sqrt(sum / samples.length));
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      setMicrophoneStatus(peak > 2 ? "Microphone is receiving sound. You can start a voice chat." : "Microphone permission is on, but the input is very quiet. Check the selected mic, mute switch, and input volume.");
+    } catch (err) {
+      setMicrophoneStatus("");
+      setError(err.name === "NotAllowedError" ? "Microphone access was blocked. Allow it in the browser's site settings, then try again." : err.message || "Could not access the microphone.");
+    } finally {
+      stream?.getTracks().forEach((track) => track.stop());
+      await context?.close?.();
+    }
+  }
+
+  function testSpeaker() {
+    if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) {
+      setError("Speech output is unavailable in this browser.");
+      return;
+    }
+    setError("");
+    window.speechSynthesis.cancel();
+    const utterance = new window.SpeechSynthesisUtterance("SafeBath voice test. Speaker is working.");
+    utterance.lang = "en-IN";
+    utterance.onerror = () => setError("The browser could not play speech. Check device volume, output device, and browser audio permissions.");
+    window.speechSynthesis.speak(utterance);
   }
 
   function startListening() {
@@ -285,7 +339,7 @@ export default function VoiceTestApp() {
   const isSpeaking = state === "Speaking";
 
   return (
-    <main style={styles.page}>
+    <main style={embedded ? styles.embeddedPage : styles.page}>
       <div style={styles.shell}>
         <header style={styles.header}>
           <div>
@@ -315,6 +369,8 @@ export default function VoiceTestApp() {
             <label style={styles.toggle}><input type="checkbox" checked={speakResponse} onChange={(event) => setSpeakResponse(event.target.checked)} /> Speak Response</label>
           </div>
           <div style={styles.controls}>
+            <button type="button" onClick={checkMicrophone} style={styles.secondaryButton}>Check Microphone</button>
+            <button type="button" onClick={testSpeaker} style={styles.secondaryButton}>Test Speaker</button>
             <button type="button" onClick={startListening} disabled={!listeningSupported || isListening || busy} style={styles.primaryButton}>Start Listening</button>
             <button type="button" onClick={stopListening} disabled={!isListening} style={styles.secondaryButton}>Stop Listening</button>
             <button type="button" onClick={stopSpeaking} disabled={!isSpeaking} style={styles.secondaryButton}>Stop Speaking</button>
@@ -322,7 +378,13 @@ export default function VoiceTestApp() {
           </div>
           {!listeningSupported && <p role="alert" style={styles.warning}>Speech recognition is not supported by this browser.</p>}
           {!synthesisSupported && <p style={styles.warning}>Speech synthesis is unavailable in this browser. You can still read replies on screen.</p>}
+          {microphoneStatus && <p role="status" style={styles.small}>{microphoneStatus}</p>}
           <p style={styles.small}>Browser speech recognition may use an online speech service. Recognition is not guaranteed to work offline.</p>
+          <form onSubmit={(event) => { event.preventDefault(); const text = draft; setDraft(""); void sendTranscript(text); }} style={styles.connectRow}>
+            <input aria-label="Message the AI assistant" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Type a message if voice input is unavailable" style={styles.input} />
+            <button type="submit" disabled={busy || !draft.trim()} style={styles.secondaryButton}>Send</button>
+          </form>
+          <label style={styles.toggle}><input type="checkbox" checked={shareWithCaretaker} onChange={(event) => setShareWithCaretaker(event.target.checked)} /> Share conversation with caretaker</label>
           <div aria-live="polite" aria-relevant="additions text" style={styles.transcript}>
             {messages.length === 0 && !interim && <p style={styles.empty}>Your conversation will appear here. Press Start Listening and speak when the browser is ready.</p>}
             {messages.map((message) => (
@@ -350,6 +412,7 @@ export default function VoiceTestApp() {
 
 const styles = {
   page: { minHeight: "100vh", padding: "32px 16px 56px", background: "radial-gradient(ellipse at 12% 0%, #173043 0, transparent 38%), #0b1524" },
+  embeddedPage: { padding: "8px 0 24px", background: "transparent" },
   shell: { width: "min(900px, 100%)", margin: "0 auto", display: "grid", gap: 18 },
   header: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 18, padding: "14px 2px" },
   eyebrow: { margin: "0 0 8px", color: "#82d9c6", letterSpacing: ".14em", fontSize: 11, fontWeight: 800 },

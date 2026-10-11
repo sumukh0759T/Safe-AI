@@ -144,6 +144,16 @@ CREATE TABLE IF NOT EXISTS voice_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_voice_requests_open ON voice_requests(expires_at, reply);
 
+-- Explicitly shared voice-test conversation turns shown in the caretaker UI.
+CREATE TABLE IF NOT EXISTS voice_conversation_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('user','assistant')),
+    text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_voice_conversation_ts ON voice_conversation_messages(ts);
+
 -- Shared cache of the last cloud-reachability check, written by whoever runs
 -- a check (api_server live probe or the sync worker) and read by the
 -- dashboard — so both processes agree on "cloud up/down" without hammering.

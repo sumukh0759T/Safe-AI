@@ -49,6 +49,7 @@ Behavior:
     diagnostics go to their own tables, not `events`.
 """
 import json
+import hmac
 import os
 import time
 import uuid
@@ -494,7 +495,7 @@ async def config() -> dict:
 
 
 @api_v1_router.get("/api/v1/voice/pending")
-async def voice_pending(device_id: str = "audio-01",
+async def voice_pending(request: Request, device_id: str = "audio-01",
                         role: str = "listen") -> dict:
     """Voice Bridge poll (was MQTT fan-out).
 
@@ -506,6 +507,19 @@ async def voice_pending(device_id: str = "audio-01",
     board can sleep and poll again."""
     if role not in ("listen", "play"):
         role = "listen"
+    device = device_manager.get(device_id)
+    if device is None or not device.enabled:
+        return JSONResponse(status_code=403,
+                            content={"error": "unknown_or_disabled_device"})
+    expected_module = "tof" if role == "play" else "audio"
+    if device.module != expected_module:
+        return JSONResponse(status_code=403,
+                            content={"error": "device_role_mismatch"})
+    if device.token:
+        supplied = request.headers.get("X-Node-Token", "")
+        if not hmac.compare_digest(supplied, str(device.token)):
+            return JSONResponse(status_code=403,
+                                content={"error": "invalid_token"})
     db_path = DB_PATH
     init_telemetry(db_path)
     claimed = claim_voice_request(db_path, device_id, role=role)

@@ -23,13 +23,24 @@
 #include <Adafruit_AMG88xx.h>
 #include <DFRobotDFPlayerMini.h>
 #include <HardwareSerial.h>
+#include "Module5Audio.h"
+#include "Module5Prompt.h"
+
+#if defined(__has_include)
+#if __has_include("Module5Credentials.local.h")
+#include "Module5Credentials.local.h"
+#endif
+#endif
+#ifndef SAFEBATH_NODE_TOKEN
+#define SAFEBATH_NODE_TOKEN ""
+#endif
 
 const char* device_id = "tof-01";           // must match SAFEBATH_DEVICES
 const char* ssid = "YOUR_ROUTER_SSID";
 const char* password = "YOUR_ROUTER_PASSWORD";
 const char* server_host = "192.168.1.50";   // RPi IP running the edge API
 const uint16_t server_port = 8000;
-const char* node_token = "";                // optional; matches device token
+const char* node_token = SAFEBATH_NODE_TOKEN;  // local-only token; matches Pi device config
 
 safebath::Node node(device_id, "tof", "1.0.0");
 
@@ -57,6 +68,7 @@ safebath::Node node(device_id, "tof", "1.0.0");
 #define DFPLAYER_TX 17   // ESP32 TX2 -> DFPlayer RX
 HardwareSerial dfSerial(2);
 DFRobotDFPlayerMini dfPlayer;
+safebath::Module5Audio audio(dfSerial, dfPlayer, DFPLAYER_RX, DFPLAYER_TX);
 
 Adafruit_VL53L1X tof1 = Adafruit_VL53L1X();
 Adafruit_VL53L1X tof2 = Adafruit_VL53L1X();
@@ -68,7 +80,7 @@ void IRAM_ATTR flowISR() { flowPulses++; }
 
 bool TOF_READY = false;
 
-void playVoicePrompt();   // defined below; also called from loop()
+bool playVoicePrompt(uint16_t promptNumber);
 
 /* -------------------- ToF boot sequence -------------------- */
 // All 3 sensors ship with the same default address (0x29). Bring them
@@ -162,12 +174,16 @@ bool checkToFCollapse() {
 }
 
 /* -------------------- Voice Bridge output -------------------- */
-void playVoicePrompt() {
-  // Track 1 on the DFPlayer's SD card should be a recorded/synthesized
-  // "Are you alright? Say yes, or say help." clip, played through the
-  // amplifier + speaker. Board 4 (MAX4466) is listening independently
-  // and will publish voice/reply within ~8s (see Board 4 firmware).
-  dfPlayer.play(1);
+bool playVoicePrompt(uint16_t promptNumber) {
+  if (!safebath::module5PromptAllowed(promptNumber)) {
+    Serial.println("[dfp] refused non-allowlisted prompt number");
+    return false;
+  }
+  if (!audio.playPrompt(promptNumber)) {
+    Serial.printf("[dfp] prompt not started: %s\n", audio.lastError());
+    return false;
+  }
+  return true;
 }
 
 /* -------------------- Setup -------------------- */
@@ -198,13 +214,9 @@ void setup() {
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, HIGH);   // energized = valve OPEN by default (NC solenoid — confirmed working)
 
-  dfSerial.begin(9600, SERIAL_8N1, DFPLAYER_RX, DFPLAYER_TX);
-  if (dfPlayer.begin(dfSerial)) {
-    Serial.println("[dfp] DFPlayer Mini OK");
-  } else {
-    Serial.println("[dfp] DFPlayer NOT RESPONDING (check RX16/TX17 + SD card)");
-  }
-  dfPlayer.volume(22);   // 0-30, tune against the amplifier's gain
+  // Non-blocking UART setup; a missing DFPlayer/SD card must not hold up
+  // ToF, thermal, flow or HTTP telemetry operation.
+  audio.begin(22);
 
   node.begin(ssid, password, server_host, server_port, node_token);
   Serial.println("[main] node ready.");
@@ -214,19 +226,40 @@ void setup() {
  * is leased independently of Board 4's listen lease, so both boards are served
  * by the same request (HTTP equivalent of the old voice/trigger fan-out). */
 void pollVoicePrompt() {
+  // Do not claim/consume a queued prompt until a card-online event confirms
+  // that the player can receive it.
+  if (!audio.isReady()) return;
   String body = node.getJson("/api/v1/voice/pending?device_id=tof-01&role=play");
   if (body.length() == 0) return;
   String flat = body;
   flat.replace(" ", "");
   if (flat.indexOf("\"has_request\":true") < 0) return;
-  Serial.println("[voice] playing prompt");
-  playVoicePrompt();
+  const int promptKey = flat.indexOf("\"prompt\":\"");
+  if (promptKey < 0) {
+    Serial.println("[voice] ignored request without a prompt name");
+    return;
+  }
+  const int valueStart = promptKey + 10;
+  const int valueEnd = flat.indexOf('"', valueStart);
+  if (valueEnd <= valueStart) {
+    Serial.println("[voice] ignored malformed prompt name");
+    return;
+  }
+  const String promptName = flat.substring(valueStart, valueEnd);
+  const uint16_t track = safebath::module5PromptTrack(promptName.c_str());
+  if (!track) {
+    Serial.println("[voice] ignored non-allowlisted prompt name");
+    return;
+  }
+  playVoicePrompt(track);
 }
 
 /* -------------------- Loop -------------------- */
 void loop() {
   static unsigned long lastVoicePoll = 0;
   static bool prevCollapse = false;
+
+  audio.poll();
 
   float thermalFrame[64];
   amg.readPixels(thermalFrame);

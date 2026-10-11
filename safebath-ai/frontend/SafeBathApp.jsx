@@ -18,6 +18,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { healthFailureMessage, resolveApiBase, resolveApiInfo } from "./apiBase.mjs";
 import { MatZonesCard, matModeFromSnapshot, snapshotIsSimulated } from "./matZones.mjs";
+import VoiceTestApp from "./VoiceTestApp.jsx";
 
 const API_BASE = resolveApiBase();
 const API_INFO = resolveApiInfo();
@@ -763,6 +764,11 @@ function SafeBathAppInner() {
           </div>
         </Card>
       </div>
+      <section aria-label="AI voice chat" style={{ marginTop: 20, border: "1px solid #334155", borderRadius: 16, padding: "8px 16px", background: "#0f172a" }}>
+        <h2 style={{ fontSize: 18, margin: "8px 0 0" }}>AI Voice Assistant</h2>
+        <p style={{ fontSize: 12, color: "#94a3b8", margin: "6px 0" }}>Chat by voice or text. Shared messages update the caretaker dashboard live.</p>
+        <VoiceTestApp embedded />
+      </section>
     </div>
   );
 }

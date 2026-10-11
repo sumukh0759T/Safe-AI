@@ -201,6 +201,17 @@ def patient_status():
     }
 
 
+@caretaker_app.get("/voice-messages")
+def get_voice_messages(limit: int = 60):
+    init_db(DB_PATH)
+    conn = get_conn(DB_PATH)
+    rows = conn.execute(
+        "SELECT id,ts,session_id,role,text FROM voice_conversation_messages "
+        "ORDER BY id DESC LIMIT ?", (max(1, min(limit, 100)),)
+    ).fetchall()
+    return {"messages": [dict(row) for row in reversed(rows)]}
+
+
 # ---- SSE endpoint: streams new alerts + state changes in real time -------- #
 
 @caretaker_app.get("/stream")
@@ -213,9 +224,11 @@ async def event_stream():
         "SELECT COALESCE(MAX(id),0) FROM alerts").fetchone()[0]
     last_risk_ts = conn.execute(
         "SELECT COALESCE(MAX(ts),0) FROM risk_state").fetchone()[0]
+    last_voice_id = conn.execute(
+        "SELECT COALESCE(MAX(id),0) FROM voice_conversation_messages").fetchone()[0]
 
     def generate():
-        nonlocal last_check, last_alert_id, last_risk_ts
+        nonlocal last_check, last_alert_id, last_risk_ts, last_voice_id
         while True:
             try:
                 now = time.time()
@@ -248,6 +261,16 @@ async def event_stream():
                         "flags": risk["active_flags"],
                     })
                     yield f"data: {data}\n\n"
+
+                voice_rows = conn.execute(
+                    "SELECT id,ts,session_id,role,text FROM voice_conversation_messages "
+                    "WHERE id > ? ORDER BY id", (last_voice_id,)
+                ).fetchall()
+                for row in voice_rows:
+                    last_voice_id = row["id"]
+                    yield "data: " + json.dumps({
+                        "type": "voice_message", **dict(row),
+                    }) + "\n\n"
 
                 # heartbeat every 15s so client knows connection is alive
                 if now - last_check >= 15:

@@ -790,6 +790,7 @@ function EmergencyCard({ event, onAck }) {
 export default function CaretakerApp() {
   const [status, setStatus] = useState(null);
   const [alerts, setAlerts] = useState([]);
+  const [voiceMessages, setVoiceMessages] = useState([]);
   const [emergencies, setEmergencies] = useState([]);
   const [connected, setConnected] = useState(false);
   const [apiError, setApiError] = useState(null);
@@ -907,6 +908,13 @@ export default function CaretakerApp() {
         setEmergencies(d.emergencies || []);
       }
     } catch {}
+    try {
+      const r = await fetch(`${API_BASE}/voice-messages?limit=60`);
+      if (r.ok) {
+        const d = await r.json();
+        setVoiceMessages(d.messages || []);
+      }
+    } catch {}
   }, []);
 
   useEffect(() => {
@@ -946,6 +954,8 @@ export default function CaretakerApp() {
                   }
                 : prev
             );
+          } else if (d.type === "voice_message") {
+            setVoiceMessages((prev) => [...prev.filter((m) => m.id !== d.id), d].slice(-60));
           }
         } catch {}
       };
@@ -1296,6 +1306,21 @@ export default function CaretakerApp() {
 
         {/* Location Map */}
         <LocationMap isDanger={isDanger} />
+
+        {/* Shared AI conversation */}
+        <section aria-label="AI voice conversation" style={{ background: "#fff", borderRadius: 16, padding: 18, marginBottom: 20, boxShadow: "0 4px 24px rgba(0,0,0,0.08)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+            <h2 style={{ margin: 0, fontSize: 16, color: "#1a3760" }}>AI Voice Assistant</h2>
+            <span style={{ fontSize: 11, color: "#64748b" }}>Shared chat · live</span>
+          </div>
+          <div aria-live="polite" style={{ display: "grid", gap: 8, maxHeight: 260, overflowY: "auto", marginTop: 12 }}>
+            {!voiceMessages.length && <p style={{ margin: 0, color: "#64748b", fontSize: 13 }}>No shared conversations yet. Voice chat messages from the dashboard will appear here.</p>}
+            {voiceMessages.map((message) => <article key={message.id} style={{ padding: "9px 11px", borderRadius: 10, background: message.role === "assistant" ? "#eff6ff" : "#ecfdf5", color: "#1e293b" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11, color: "#475569", fontWeight: 700 }}><span>{message.role === "assistant" ? "AI assistant" : "User"}</span><time>{new Date(message.ts * 1000).toLocaleTimeString()}</time></div>
+              <p style={{ margin: "5px 0 0", fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{message.text}</p>
+            </article>)}
+          </div>
+        </section>
 
         {/* Emergencies — durable local source of truth */}
         {activeEmergencies.length > 0 && (
