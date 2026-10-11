@@ -1,10 +1,9 @@
 """
-Synthetic pressure-mat training data — 16x4 grid (64 cells, row-major),
+Synthetic pressure-mat training data — 12x6 grid (72 cells, row-major),
 20-frame sequences, 3 classes: 0=normal, 1=unsteady, 2=fall.
 
-Grid shape per final wiring (Master Guide Section 0/1): CD4067 = 16 rows,
-74HC595 Q1-Q4 = 4 columns. Same 64-cell count as the original 8x8 assumption,
-different aspect ratio -> sequences are (20, 16, 4).
+Grid shape per final wiring (Master Guide Section 0/1): CD4067 = 12 rows
+(channels 0-11), 74HC595 Q1-Q6 = 6 columns. Sequences are (20, 12, 6).
 
 Physics-informed domain randomization:
  - normal   : slow gentle weight shifts, low spatial/temporal variance
@@ -14,7 +13,7 @@ Physics-informed domain randomization:
 """
 import numpy as np
 
-ROWS, COLS, T = 16, 4, 20
+ROWS, COLS, T = 12, 6, 20
 ADC_MAX = 4095
 
 # TODO(calibration): replace with real Velostat ADC ranges from Board-1 bring-up
@@ -37,8 +36,8 @@ def make_sequence(label, rng):
 
     if label == 2:  # fall: brief steps then body-down, sustained
         n_walk = rng.integers(8, 12)
-        rc = rng.uniform(3, 12)
-        cc = rng.uniform(1.0, 2.5)
+        rc = rng.uniform(2, 9)
+        cc = rng.uniform(1.2, 4.2)
         for t in range(n_walk):
             sway = rng.normal(0, 0.35)
             frames[t] = _blob((ROWS, COLS), rc + sway, cc,
@@ -48,18 +47,18 @@ def make_sequence(label, rng):
         floor_rc = min(rc + rng.uniform(2.0, 5.0), ROWS - 2)
         for t in range(impact_t, T):
             grow = 1.0 + 0.25 * (t - impact_t)
-            frames[t] = _blob((ROWS, COLS), floor_rc, rng.uniform(0.8, 2.8),
+            frames[t] = _blob((ROWS, COLS), floor_rc, rng.uniform(1.2, 3.8),
                               2.6 * grow, 1.7 * grow, base_peak * 0.85)
     elif label == 1:  # unsteady: exaggerated slow sway, never settles
         phase = rng.uniform(0, 2 * np.pi)
-        amp = rng.uniform(2.2, 4.5)
+        amp = rng.uniform(1.8, 3.6)
         for t in range(T):
-            rc = 7.5 + amp * np.sin(phase + t * rng.uniform(0.5, 0.9))
-            cc = 1.5 + 0.8 * np.sin(phase * 0.7 + t * 0.4)
+            rc = 5.5 + amp * np.sin(phase + t * rng.uniform(0.5, 0.9))
+            cc = 2.6 + 1.0 * np.sin(phase * 0.7 + t * 0.4)
             frames[t] = _blob((ROWS, COLS), rc, cc,
                               rng.uniform(1.4, 2.2), 0.95, base_peak * 0.9)
     else:  # normal
-        rc, cc = rng.uniform(4, 11), rng.uniform(1.0, 2.4)
+        rc, cc = rng.uniform(3, 9), rng.uniform(1.5, 4.2)
         drift = rng.normal(0, 0.18, size=(T, 2)).cumsum(axis=0)
         for t in range(T):
             frames[t] = _blob((ROWS, COLS),
@@ -85,7 +84,7 @@ def main(out_dir="data/synthetic"):
     import os
     os.makedirs(out_dir, exist_ok=True)
     X, y = generate()
-    # stored row-major so a flattened frame == the 64-int MQTT CSV payload order
+    # stored row-major so a flattened frame == the 72-int MQTT CSV payload order
     np.save(os.path.join(out_dir, "mat_synth_X.npy"), X)
     np.save(os.path.join(out_dir, "mat_synth_y.npy"), y)
     print(f"mat: saved {X.shape} frames, labels {np.bincount(y)} -> {out_dir}")

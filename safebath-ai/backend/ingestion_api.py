@@ -27,7 +27,7 @@ Envelope (all fields required, extra fields rejected):
       "payload": { ... }                     // module/message_type specific
     }
 
-Payload shapes reuse the existing schemas.py contract (16x4 mat frame = 64 ints,
+Payload shapes reuse the existing schemas.py contract (12x6 mat frame = 72 ints,
 radar presence/motion/stillness_ms/possible_collapse, toilet gas/voc/turbidity/
 hour_of_day + optional temp_c, audio label/energy, tof avg_thermal_c/flow_pulses/
 tof_collapse/unattended_hot_fill). Events carry mat {"entry": bool}, audio
@@ -38,7 +38,7 @@ Behavior:
   * unknown device, wrong module, bad token -> 403, recorded in invalid_events
   * duplicate / out-of-order (boot_id, sequence) -> 409, recorded in invalid_events
   * accepted telemetry/event -> written to `events` with the EXACT legacy topic
-    + wire format (mat frame stays a 64-int CSV), so fusion_engine and the
+    + wire format (mat frame stays a 72-int CSV), so fusion_engine and the
     frontend /api/latest contract keep working unchanged. Heartbeats and
     diagnostics go to their own tables, not `events`.
 """

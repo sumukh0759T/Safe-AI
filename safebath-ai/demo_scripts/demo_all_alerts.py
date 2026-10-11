@@ -31,6 +31,8 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from backend.schemas import MAT_CELL_COUNT
+
 MQTT_HOST = "localhost"
 MQTT_PORT = 1883
 
@@ -57,14 +59,16 @@ def make_direct_writer(db_path="data/events.db"):
 
 # -- Scenario builders ------------------------------------------------
 def build_mat_fall_frames(count=25):
-    """64 cells all high (sustained) + one frame with CoP shift (centroid jump)."""
+    """72 cells all high (sustained) + one frame with CoP shift (centroid jump)."""
     frames = []
     for i in range(count):
         if i == 15:
             # CoP jump: spike pressure on one side
-            vals = [random.randint(200, 400)] * 48 + [random.randint(3200, 4000)] * 16
+            high = MAT_CELL_COUNT // 4
+            vals = [random.randint(200, 400)] * (MAT_CELL_COUNT - high) \
+                + [random.randint(3200, 4000)] * high
         else:
-            vals = [random.randint(3000, 3900)] * 64
+            vals = [random.randint(3000, 3900)] * MAT_CELL_COUNT
         frames.append(("sensor/mat/frame", ",".join(map(str, vals))))
     return frames
 
@@ -86,7 +90,7 @@ def build_thermal_scald(count=8):
     frames = []
     for i in range(count):
         # Empty mat (nobody)
-        mat_vals = [random.randint(0, 200)] * 64
+        mat_vals = [random.randint(0, 200)] * MAT_CELL_COUNT
         frames.append(("sensor/mat/frame", ",".join(map(str, mat_vals))))
         # Hot thermal + flow
         thermal = json.dumps({

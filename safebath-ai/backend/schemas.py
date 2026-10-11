@@ -4,7 +4,7 @@ Pydantic models mirroring the FINAL MQTT data contract
 Section 2 where they differ).
 
 Differences vs the older spec, all deliberate:
- - mat frame stays a 64-int CSV but is 16 rows x 4 cols (row-major)
+ - mat frame is a 72-int CSV, 12 rows x 6 cols (row-major), per final wiring
  - toilet reading has NO temp_c (DS18B20 not in final wiring); kept optional
    so re-adding it later is a one-line change (Master Guide Section 12.1)
  - audio events are JSON {"label", "energy"} — MAX4466 is analog, energy is
@@ -17,9 +17,9 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 # ---- grid geometry (single source of truth) -------------------------------
-MAT_ROWS = 16          # CD4067 channels
-MAT_COLS = 4           # 74HC595 Q1-Q4
-MAT_CELL_COUNT = MAT_ROWS * MAT_COLS   # 64 — same count as old 8x8 plan
+MAT_ROWS = 12          # CD4067 channels 0-11
+MAT_COLS = 6           # 74HC595 Q1-Q6
+MAT_CELL_COUNT = MAT_ROWS * MAT_COLS   # 72
 ADC_MAX = 4095         # 12-bit ESP32 ADC
 
 
@@ -28,7 +28,7 @@ class StrictModel(BaseModel):
 
 
 class MatFramePayload(StrictModel):
-    """64 comma-separated ints, row-major over a 16x4 Velostat grid."""
+    """72 comma-separated ints, row-major over a 12x6 Velostat grid."""
     values: List[int] = Field(..., min_length=MAT_CELL_COUNT,
                               max_length=MAT_CELL_COUNT)
 

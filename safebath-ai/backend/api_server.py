@@ -7,7 +7,7 @@ Run:  uvicorn backend.api_server:app --reload --port 8000
 Response shape (superset of the spec — extra keys are additive, so the
 frontend contract stays stable):
   risk_score, band, state, modules{...}, events[...],
-  mat_frame {values[64], rows, cols}, mat_frames_recent[[64], ...]  (CoP trail)
+  mat_frame {values[72], rows, cols}, mat_frames_recent[[72], ...]  (CoP trail)
   risk_history [{ts, score}]
 If the DB is empty (bring-up day), a clearly-labeled mock seed is inserted once
 so Live mode demos end-to-end without hardware.
@@ -25,6 +25,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.db import DEFAULT_DB, get_conn, init_db
+from backend.schemas import MAT_CELL_COUNT, MAT_COLS, MAT_ROWS
 from backend.telemetry_store import init_telemetry
 
 from backend.caretaker_api import caretaker_app
@@ -160,7 +161,8 @@ def _seed_mock_if_empty(conn: sqlite3.Connection) -> None:
         return
     now = time.time()
     seed = [
-        ("sensor/mat/frame", ",".join(["120"] * 63 + ["2400"])),
+        ("sensor/mat/frame",
+         ",".join(["120"] * (MAT_CELL_COUNT - 1) + ["2400"])),
         ("sensor/mat/pir", '{"entry": true}'),
         ("sensor/radar/status",
          '{"presence": true, "motion": true, "stillness_ms": 0, '
@@ -200,7 +202,7 @@ def latest():
         modules[mod_id] = {"value": row["payload"] if row else None,
                            "ts": None}
 
-    # raw 64-int CSV exactly as published on sensor/mat/frame, unmodified —
+    # raw 72-int CSV exactly as published on sensor/mat/frame, unmodified —
     # the live heatmap's per-cell source of truth
     modules["mat"]["raw_frame"] = modules["mat"]["value"]
 
@@ -216,7 +218,7 @@ def latest():
         try:
             vals = [int(x) for x in
                     r["payload"].replace("[mock-seed]", "").strip().split(",")]
-            if len(vals) == 64:
+            if len(vals) == MAT_CELL_COUNT:
                 recent_frames.append(vals)
         except ValueError:
             continue
@@ -233,7 +235,7 @@ def latest():
         "modules": modules,
         "events": [{"text": f"{t}: {p}", "level": _danger_level(t, p),
                     "ts": ts} for ts, t, p in events],
-        "mat_frame": {"values": mat_values, "rows": 16, "cols": 4},
+        "mat_frame": {"values": mat_values, "rows": MAT_ROWS, "cols": MAT_COLS},
         "mat_frames_recent": list(reversed(recent_frames)),
         "risk_history": list(reversed(history)),
         # ---- additive fields (new client feature additions) ----------------

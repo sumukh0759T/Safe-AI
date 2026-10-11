@@ -32,7 +32,7 @@ message_type`) defined in `firmware/common/SafeBathTelemetry.h`.
 
 | Board | HTTP call (message_type `module`) | Payload |
 |---|---|---|
-| 1 Mat | `POST /api/v1/telemetry` `mat` | `{"values": [64 ints]}` (16x4 row-major, 12-bit 0-4095 @10Hz) |
+| 1 Mat | `POST /api/v1/telemetry` `mat` | `{"values": [72 ints]}` (12x6 row-major, 12-bit 0-4095 @10Hz) |
 | 1 Mat PIR | `POST /api/v1/event` `mat` | `{"entry": true}` |
 | 2 Radar | `POST /api/v1/telemetry` `radar` | `{"presence": bool, "motion": bool, "stillness_ms": int, "possible_collapse": bool}` @2Hz |
 | 3 Toilet | `POST /api/v1/telemetry` `toilet` | `{"gas_ppm": float, "voc_ppm": float, "turbidity": float, "hour_of_day": int}` every 2s (`temp_c` optional — pending DS18B20 decision) |
@@ -56,7 +56,7 @@ Kept verbatim from SOFTWARE_BUILD_SPEC.md Section 4 so nobody re-derives this:
 
 | # | Module | Original planned model (ideal hardware) | **Actual model to implement now** (confirmed hardware) | Why it changed |
 |---|---|---|---|---|
-| 1 | Fall Risk | Spatiotemporal CNN on a 32×32 Velostat grid → Frailty Index | **ConvLSTM2D on an 8×8 grid** (now **16×4**, same 64 cells, per final wiring), 3-class (normal/unsteady/fall) | Confirmed mux/shift-register setup reads a coarser grid; ConvLSTM still captures the sway trajectory that matters |
+| 1 | Fall Risk | Spatiotemporal CNN on a 32×32 Velostat grid → Frailty Index | **ConvLSTM2D on an 8×8 grid** (now **12×6**, 72 cells, per final wiring), 3-class (normal/unsteady/fall) | Confirmed mux/shift-register setup reads a coarser grid; ConvLSTM still captures the sway trajectory that matters |
 | 2 | Cardiac/Presence | LSTM on mmWave micro-Doppler → HR/RR anomaly | **Rule-based: presence + stillness-duration threshold** | C4001 exposes presence/motion booleans, not raw Doppler/vitals data |
 | 3 | Toilet Biomarkers | Random Forest / SVM fusion on gas + optical + thermal + frequency | **Random Forest on tabular features** (gas_ppm, voc_ppm, turbidity) | Final wiring has no toilet-side thermal sensor; DS18B20 dropped |
 | 4 | Acoustic Distress | MobileNetV2 on Mel-spectrograms → later YAMNet embeddings | **RMS/ZCR/spectral-centroid features → tiny dense net or thresholds** (Master Guide §5.1) | MAX4466 is analog — YAMNet/I2S approach no longer applies; features computed identically in firmware and training |
@@ -120,9 +120,33 @@ npm run serve          # http://localhost:8080  (or: python -m http.server 8080)
 Toggle **LIVE** in the nav bar; with `api_server` running on :8000 the cards
 populate with real (or simulated) data within ~3 s. A **System** strip shows
 whether data is LIVE or SIMULATED, cloud sync state, local outbox depth, device
-freshness, and active emergencies. To point the app at another host, set
-`window.SAFEBATH_API_BASE` or a `<meta name="safebath-api-base" content="...">`
-tag (defaults to `http://localhost:8000`).
+freshness, and active emergencies. The API base is resolved from (highest
+priority): `window.SAFEBATH_API_BASE` → `<meta name="safebath-api-base"
+content="...">` → `?api=<base>` query param (persisted for the session) → for a
+page served over http from a non-local host, `http://<host>:8000` (LAN) →
+`http://localhost:8000`. When the API is unreachable the apps show which base
+they're calling and a hint for that scenario (mixed-content on https pages,
+file://, firewall/network). Hosted https pages (e.g. Hostinger) **must** set an
+https API override — the browser blocks plain-http API calls from https pages.
+
+**Laptop serving + Raspberry Pi API.** The dashboard is normally served from
+the laptop (`npm run serve`/`python -m http.server 8080` in `frontend/`), so the
+page host is `localhost` and the resolver deliberately falls back to
+`http://localhost:8000` — which only works when the API also runs on this
+machine. For a Pi on the LAN, create a per-machine override instead:
+
+```bash
+cd frontend
+copy config.example.js config.local.js        # then edit it:
+#   window.SAFEBATH_API_BASE = "http://192.168.43.66:8000";
+```
+
+`config.local.js` is git-ignored (see `config.example.js`), loaded by
+`index.html`/`caretaker.html` before the bundle, and needs no rebuild — just
+refresh. Alternatively pass `?api=http://<pi-ip>:8000` in the URL. Remember to
+re-run `sudo ./update.sh` on the Pi after backend changes (and re-flash
+`firmware/mat_node/mat_node.ino`), or `/api/latest` will keep reporting the old
+frame shape and the mat parser (12×6 = 72 values) will ignore it.
 
 ## Caretaker PWA (push + offline acks)
 

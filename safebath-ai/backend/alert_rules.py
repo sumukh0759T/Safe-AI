@@ -54,7 +54,7 @@ def mat_unsteady_sustained(unsteady_seconds: float) -> bool:
 # The ConvLSTM (fall_risk_model.h5) needs real training data; until then these
 # physics rules provide the live fall/stumble signal. They feed the SAME
 # 'fall_risk' flag as the model, so upgrading later changes nothing upstream.
-MAT_SUSTAIN_HIGH_SUM = 60_000.0     # sum of all 64 cells above this...
+MAT_SUSTAIN_HIGH_SUM = 67_500.0   # sum of all 72 cells above this (60k * 72/64)...
 MAT_SUSTAIN_SECONDS = 2.0           # ...held for 2+ s straight -> body down
 MAT_CENTROID_JUMP_CELLS = 5.0       # CoP shift between frames -> stumble
 

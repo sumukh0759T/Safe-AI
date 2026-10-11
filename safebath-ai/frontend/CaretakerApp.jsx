@@ -18,19 +18,14 @@
  *   - Connection health indicator
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { healthFailureMessage, resolveApiBase, resolveApiInfo } from "./apiBase.mjs";
 
-/* API base is configurable so the same static bundle works on the Pi, a phone
- * on the LAN, or a hosted dashboard. Override with window.SAFEBATH_API_BASE or
- * <meta name="safebath-api-base">. Defaults to the local edge server. */
-function resolveApiBase() {
-  if (typeof window !== "undefined") {
-    if (window.SAFEBATH_API_BASE) return String(window.SAFEBATH_API_BASE).replace(/\/$/, "");
-    const m = document.querySelector('meta[name="safebath-api-base"]');
-    if (m && m.content) return m.content.replace(/\/$/, "");
-  }
-  return "http://localhost:8000";
-}
-const API_BASE = `${resolveApiBase()}/caretaker`;
+/* API base is resolved by the shared apiBase.js module (window override,
+ * meta tag, ?api= query param, or auto-derive http://<host>:8000 on the LAN).
+ * The caretaker backend is mounted under /caretaker. */
+const API_ROOT = resolveApiBase();
+const API_BASE = `${API_ROOT}/caretaker`;
+const API_INFO = resolveApiInfo();
 const POLL_MS = 5000;
 
 /* Leaflet CSS + JS loaded from CDN once */
@@ -797,6 +792,7 @@ export default function CaretakerApp() {
   const [alerts, setAlerts] = useState([]);
   const [emergencies, setEmergencies] = useState([]);
   const [connected, setConnected] = useState(false);
+  const [apiError, setApiError] = useState(null);
   const [lastAlertId, setLastAlertId] = useState(0);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [notificationRequested, setNotificationRequested] = useState(false);
@@ -851,6 +847,7 @@ export default function CaretakerApp() {
             const s = await r.json();
             setStatus(s);
             setConnected(true);
+            setApiError(null);
 
             if (
               s.state === "voice_pending" ||
@@ -877,8 +874,13 @@ export default function CaretakerApp() {
             }
             prevScoreRef.current = s.risk_score;
           }
-        } catch {
+        } catch (err) {
           setConnected(false);
+          setApiError(healthFailureMessage({
+            apiBase: API_ROOT,
+            pageProtocol: window.location.protocol,
+            error: err,
+          }));
         }
         await new Promise((r) => setTimeout(r, POLL_MS));
       }
@@ -1118,6 +1120,17 @@ export default function CaretakerApp() {
           </span>
         </div>
       </div>
+
+      {!connected && (
+        <div style={{ fontSize: 11, color: "#fca5a5", background: "#450a0a", border: "1px solid #7f1d1d", borderRadius: 10, padding: "8px 12px", margin: "8px 16px 0", fontFamily: "monospace", lineHeight: 1.5 }}>
+          API base: <b>{API_ROOT}</b>
+          {API_INFO.reason
+            ? ` — ${API_INFO.reason}`
+            : API_INFO.hint
+              ? ` — ${API_INFO.hint}`
+              : ` — ${apiError || "connection failed (server not running or unreachable on port 8000)"}`}
+        </div>
+      )}
 
       {/* Content container */}
       <div style={{ padding: "20px 16px", maxWidth: 480, margin: "0 auto" }}>

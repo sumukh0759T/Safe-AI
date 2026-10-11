@@ -12,7 +12,7 @@ from datasets.gen_radar_stub_data import synthetic_radar_stream
 class TestMat:
     def test_shapes_and_labels(self):
         X, y = gen_mat(n_per_class=4, seed=1)
-        assert X.shape == (12, 20, 16, 4)   # 16x4 grid per final wiring
+        assert X.shape == (12, 20, 12, 6)   # 12x6 grid per final wiring
         assert set(np.unique(y)) == {0, 1, 2}
         assert X.max() <= 4095 and X.min() >= 0   # 12-bit ADC range
 

@@ -1,5 +1,5 @@
 """
-Module 1 — Fall Risk ConvLSTM on the confirmed 16x4 pressure grid.
+Module 1 — Fall Risk ConvLSTM on the confirmed 12x6 pressure grid.
 
 Input : data/synthetic/mat_synth_X.npy  (N, 20, ROWS=16, COLS=4), labels 0/1/2
 Arch  : Reshape -> ConvLSTM2D(8,(3,3)) -> Flatten -> Dense(16 relu) -> Dense(3 softmax)

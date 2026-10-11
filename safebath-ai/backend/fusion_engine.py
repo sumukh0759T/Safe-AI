@@ -38,10 +38,11 @@ from backend.schemas import MAT_COLS, MAT_ROWS, parse_for_topic
 HIGH_SEVERITY_TRIGGERS = {"fall", "radar_collapse", "tof_collapse",
                           "thud_confirmed", "sustained_cry"}
 
-# sum of all 64 cells above this == someone on the mat. Sized against the mock
-# publisher's signal model (calm noise floor sums ~12k, full-body press ~200k);
+# sum of all 72 cells above this == someone on the mat. Sized against the mock
+# publisher's signal model (calm noise floor sums ~12k, full-body press ~200k)
+# and scaled by cell count from the old 64-cell grid (60_000 * 72/64);
 # recalibrate against real Velostat frames during Phase A bring-up.
-MAT_PRESSURE_THRESHOLD = 60_000
+MAT_PRESSURE_THRESHOLD = 67_500
 
 
 class FusionEngine:

@@ -12,7 +12,10 @@ pytest.importorskip("fastapi")
 TestClient = pytest.importorskip("fastapi.testclient").TestClient
 
 
-def mat_frame_values(n=64, base=120):
+def mat_frame_values(n=None, base=120):
+    from backend.schemas import MAT_CELL_COUNT
+    if n is None:
+        n = MAT_CELL_COUNT
     return [base + (i * 37) % 2000 for i in range(n)]
 
 
@@ -113,7 +116,7 @@ def test_mat_telemetry_accepted_and_latest_unchanged(client, db):
     latest = client.get("/api/latest").json()
     assert latest["modules"]["mat"]["value"] == ",".join(str(v) for v in values)
     assert latest["mat_frame"]["values"] == values
-    assert len(latest["mat_frames_recent"][-1]) == 64  # heatmap trail intact
+    assert len(latest["mat_frames_recent"][-1]) == 72  # heatmap trail intact
 
 
 def test_all_modules_telemetry_use_legacy_topics(client, db):
@@ -225,7 +228,7 @@ def test_unsupported_contract_version_rejected(client, db):
 
 
 def test_invalid_payload_rejected(client, db):
-    # mat frame must carry exactly 64 values
+    # mat frame must carry exactly 72 values
     r = client.post("/api/v1/telemetry",
                     json=envelope(payload={"values": [1, 2, 3]}))
     assert r.status_code == 400

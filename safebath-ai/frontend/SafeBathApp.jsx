@@ -5,33 +5,24 @@
  *   import SafeBathApp from "./SafeBathApp";   export default function Page(){return <SafeBathApp/>}
  * or render it directly inside a Vite/CRA entry point.
  *
- * Live mode polls http://localhost:8000/api/latest every ~3s (backend/api_server.py).
+ * Live mode polls <API_BASE>/api/latest (~3s); API_BASE comes from the shared
+ * apiBase.js resolver (backend/api_server.py). Overrides: window.SAFEBATH_API_BASE,
+ * <meta name="safebath-api-base">, or ?api=... query param.
  * Response shape is documented in that file; extra keys are additive.
  *
  * Board-1 card implements Master Guide Section 2.4 visualizations #1-#3:
- *   1. live 16x4 Velostat heatmap (blue -> red)
+ *   1. live 12x6 Velostat heatmap (blue -> red)
  *   2. numeric ADC overlay toggle (calibration sessions)
  *   3. center-of-pressure trail (the sway trajectory ConvLSTM learns from)
  */
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { healthFailureMessage, resolveApiBase, resolveApiInfo } from "./apiBase.mjs";
 
-/* API base is configurable so the same static bundle works on the Pi, a phone
- * on the LAN, or a hosted dashboard. Override with either of:
- *   window.SAFEBATH_API_BASE = "http://192.168.1.20:8000"   (set before load)
- *   <meta name="safebath-api-base" content="http://192.168.1.20:8000">
- * Defaults to the local edge server. */
-function resolveApiBase() {
-  if (typeof window !== "undefined") {
-    if (window.SAFEBATH_API_BASE) return String(window.SAFEBATH_API_BASE).replace(/\/$/, "");
-    const m = document.querySelector('meta[name="safebath-api-base"]');
-    if (m && m.content) return m.content.replace(/\/$/, "");
-  }
-  return "http://localhost:8000";
-}
 const API_BASE = resolveApiBase();
+const API_INFO = resolveApiInfo();
 const LIVE_URL = `${API_BASE}/api/latest`;
-const MAT_ROWS = 16;
-const MAT_COLS = 4;
+const MAT_ROWS = 12;
+const MAT_COLS = 6;
 const POLL_MS = 3000;
 
 /* ----------------------------- helpers ---------------------------------- */
@@ -42,7 +33,7 @@ function parseJsonSafe(s) {
   const cleaned = s.replace(/^\[mock-seed\]\s*/, "");
   try { return JSON.parse(cleaned); } catch { return null; }
 }
-function parseCsv64(s) {
+function parseCsv(s) {
   if (!s) return null;
   let parts;
   if (Array.isArray(s)) {
@@ -53,7 +44,7 @@ function parseCsv64(s) {
     const cleaned = s.replace(/^\[mock-seed\]\s*/, "").trim();
     parts = cleaned.split(",").map((x) => parseInt(x, 10));
   }
-  if (parts.length !== 64 || parts.some(Number.isNaN)) return null;
+  if (parts.length !== MAT_ROWS * MAT_COLS || parts.some(Number.isNaN)) return null;
   return parts;
 }
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -72,7 +63,7 @@ function heatColor(v01) {
   return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
 
-/* center of pressure over a 16x4 row-major frame */
+/* center of pressure over a 12x6 row-major frame */
 function centerOfPressure(values) {
   let sw = 0, sr = 0, sc = 0;
   for (let r = 0; r < MAT_ROWS; r++) {
@@ -88,11 +79,11 @@ function centerOfPressure(values) {
 /* --------------------------- mock generator ------------------------------ */
 
 function mockFrame(t, mode) {
-  const values = new Array(64).fill(0);
+  const values = new Array(MAT_ROWS * MAT_COLS).fill(0);
   const jitter = mode === "fall" ? 3.5 : mode === "unsteady" ? 1.8 : 0.35;
-  const rc = 7.5 + jitter * Math.sin(t * (mode === "unsteady" ? 0.9 : 0.25)) +
-    (mode === "fall" ? clamp((t % 60) / 12, 0, 3.2) : 0);
-  const cc = 1.5 + 0.6 * Math.sin(t * 0.18);
+  const rc = 5.5 + jitter * Math.sin(t * (mode === "unsteady" ? 0.9 : 0.25)) +
+    (mode === "fall" ? clamp((t % 60) / 12, 0, 2.8) : 0);
+  const cc = 2.5 + 0.6 * Math.sin(t * 0.18);
   const peak = mode === "fall" ? 3400 : 2600;
   for (let r = 0; r < MAT_ROWS; r++)
     for (let c = 0; c < MAT_COLS; c++) {
@@ -225,7 +216,7 @@ function MatCard({ frameValues, recentFrames }) {
   }, [frameValues, recentFrames, overlay]);
 
   return (
-    <Card title="Board 1 — Pressure Mat" subtitle="sensor/mat/frame · 16×4 · ConvLSTM fall-risk"
+    <Card title="Board 1 — Pressure Mat" subtitle="sensor/mat/frame · 12×6 · ConvLSTM fall-risk"
       danger={false}>
       <canvas ref={canvasRef} width={MAT_COLS * cellW} height={MAT_ROWS * cellH}
         style={{ width: "100%", imageRendering: "pixelated", borderRadius: 8, background: "#0b1220" }} />
@@ -472,6 +463,7 @@ class DashBoundary extends React.Component {
 function SafeBathAppInner() {
   const [mode, setMode] = useState("mock");           // "mock" | "live"
   const [liveStatus, setLiveStatus] = useState(false); // true once API reachable
+  const [liveError, setLiveError] = useState(null);    // last health failure detail
   const [snap, setSnap] = useState(() => makeMockSnapshot());
   const [log, setLog] = useState([]);
   const [history, setHistory] = useState([]);
@@ -487,10 +479,18 @@ function SafeBathAppInner() {
         const data = await res.json();
         if (!alive) return;
         setLiveStatus(true);
+        setLiveError(null);
         setSnap({ ...data, _mock: false, ts: Date.now() / 1000 });
         setHistory(data.risk_history?.map((h) => h.score) ?? []);
-      } catch {
-        if (alive) setLiveStatus(false);
+      } catch (err) {
+        if (alive) {
+          setLiveStatus(false);
+          setLiveError(healthFailureMessage({
+            apiBase: API_BASE,
+            pageProtocol: window.location.protocol,
+            error: err,
+          }));
+        }
       }
     };
     poll();
@@ -516,12 +516,12 @@ function SafeBathAppInner() {
     setLog((l) => [{ text, level, time: new Date().toLocaleTimeString() }, ...l].slice(0, 40));
 
   const matValues = useMemo(() => {
-    if (mode === "live") return parseCsv64(snap.mat_frame?.values);
+    if (mode === "live") return parseCsv(snap.mat_frame?.values);
     return snap.mat_frame.values;
   }, [mode, snap]);
   const recentFrames = useMemo(() => {
     if (mode === "live")
-      return (snap.mat_frames_recent || []).map(parseCsv64).filter(Boolean);
+      return (snap.mat_frames_recent || []).map(parseCsv).filter(Boolean);
     return [matValues].filter(Boolean);
   }, [mode, snap, matValues]);
 
@@ -559,6 +559,17 @@ function SafeBathAppInner() {
           </span>
         </div>
       </div>
+
+      {mode === "live" && !liveStatus && (
+        <div style={{ fontSize: 11, color: "#fca5a5", background: "#450a0a", border: "1px solid #7f1d1d", borderRadius: 10, padding: "8px 12px", marginBottom: 18, fontFamily: "monospace", lineHeight: 1.5 }}>
+          API base: <b>{API_BASE}</b>
+          {API_INFO.reason
+            ? ` — ${API_INFO.reason}`
+            : API_INFO.hint
+              ? ` — ${API_INFO.hint}`
+              : ` — ${liveError || "connection failed (server not running or unreachable on port 8000)"}`}
+        </div>
+      )}
 
       {/* risk banner */}
       <div style={{ display: "flex", alignItems: "center", gap: 20, background: "#0f172a", border: `1px solid ${bandColor}`, borderRadius: 14, padding: "14px 20px", marginBottom: 18 }}>

@@ -21,7 +21,7 @@ def test_latest_shape(client):
                 "mat_frame", "mat_frames_recent", "risk_history"):
         assert key in data
     assert set(data["modules"]) == {"mat", "radar", "toilet", "audio", "tof"}
-    assert len(data["mat_frame"]["values"]) == 64
+    assert len(data["mat_frame"]["values"]) == 72
 
 
 def test_mock_seed_populates(client):
@@ -31,16 +31,16 @@ def test_mock_seed_populates(client):
 
 
 def test_mat_frame_roundtrip(client, tmp_db):
-    """A real 16x4 CSV frame published through the bridge must surface intact."""
+    """A real 12x6 CSV frame published through the bridge must surface intact."""
     from backend.db import get_conn
-    payload = ",".join(str((i * 37) % 4096) for i in range(64))
+    payload = ",".join(str((i * 37) % 4096) for i in range(72))
     conn = get_conn(tmp_db)
     conn.execute("INSERT INTO events(ts,topic,payload) VALUES "
                  "(?, 'sensor/mat/frame', ?)", (123.0, payload))
     conn.commit()
     data = client.get("/api/latest").json()
     assert data["mat_frame"]["values"][1] == (37) % 4096
-    assert data["mat_frame"]["rows"] == 16 and data["mat_frame"]["cols"] == 4
+    assert data["mat_frame"]["rows"] == 12 and data["mat_frame"]["cols"] == 6
 
 
 def test_event_levels(client, tmp_db):

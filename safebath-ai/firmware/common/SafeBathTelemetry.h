@@ -5,7 +5,7 @@
  * firmware mirror of backend/ingestion_api.py — the JSON *key names, values
  * and message_type strings must stay byte-for-byte in sync with the Python
  * contract*, and the payload JSON fragment each board builds must match the
- * payload schemas in backend/schemas.py (16x4 mat frame = 64 ints, etc.).
+ * payload schemas in backend/schemas.py (12x6 mat frame = 72 ints, etc.).
  *
  * Each board builds a TelemetryMessage and serializes it to exactly:
  *
@@ -29,11 +29,15 @@
 #include <Arduino.h>
 #include <stdint.h>
 
+#if defined(ARDUINO_ARCH_ESP32)
+#include <esp_random.h>
+#endif
+
 #ifndef SAFEBATH_CONTRACT_VERSION
 #define SAFEBATH_CONTRACT_VERSION 1u
 #endif
 
-// Longest serialized message: a mat telemetry frame (~430 chars at 64 ints).
+// Longest serialized message: a mat telemetry frame (~480 chars at 72 ints).
 // Any board may use more; the serializer truncates gracefully to the buffer.
 #ifndef SAFEBATH_TELEMETRY_MAX_LEN
 #define SAFEBATH_TELEMETRY_MAX_LEN 1024u
@@ -69,23 +73,30 @@ inline const char* pathForMessageType(MessageType t) {
 }
 
 /*
- * boot_id: stable identifier for this boot session. Sequence numbers are
- * per-boot counters, so boot_id must change whenever the chip reboots — the
- * RPi rejects duplicate (boot_id, sequence) pairs, and a fresh boot_id lets
- * the sequence restart from 0. Derived from the ESP32 eFuse MAC.
+ * boot_id: one random 64-bit value drawn ONCE per boot session. Every message
+ * in the same boot shares this id with a strictly increasing per-boot sequence;
+ * the RPi rejects duplicate / out-of-order (boot_id, sequence) pairs. Drawn
+ * from the hardware RNG (esp_random(), esp_random.h — the ESP32 RF RNG), NOT
+ * the eFuse MAC — the MAC never changes between reboots, so using it would make
+ * every reboot look like an out-of-order continuation of the previous session
+ * and all frames would be rejected with HTTP 409.
  */
 inline void makeBootId(char* out, size_t capacity) {
   if (capacity == 0) return;
 #if defined(ARDUINO_ARCH_ESP32)
-  uint64_t mac = ESP.getEfuseMac();
+  /* esp_random() reads the hardware (RF) RNG. Two 32-bit draws are combined
+     into one 64-bit per-boot session id. */
+  uint64_t r = ((uint64_t)esp_random() << 32) ^ (uint64_t)esp_random();
   char tmp[17];
-  snprintf(tmp, sizeof(tmp), "%016llX", (unsigned long long)mac);
+  snprintf(tmp, sizeof(tmp), "%016llX", (unsigned long long)r);
 #elif defined(ARDUINO_ARCH_ESP8266)
+  /* ESP8266 core has no esp_random(); EspClass::random() reads os_random. */
   char tmp[17];
-  snprintf(tmp, sizeof(tmp), "%08X", (unsigned)ESP.getChipId());
+  snprintf(tmp, sizeof(tmp), "%016llX",
+           (((uint64_t)ESP.random() << 32) ^ (uint64_t)ESP.random()));
 #else
   char tmp[17];
-  snprintf(tmp, sizeof(tmp), "%08lX", (unsigned long)(millis() ^ 0x5AFEBATH));
+  snprintf(tmp, sizeof(tmp), "%08lX", (unsigned long)(millis() ^ 0x5AFEBA77u));
 #endif
   size_t n = strlen(tmp);
   size_t m = (n < capacity - 1) ? n : capacity - 1;

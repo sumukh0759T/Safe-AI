@@ -57,16 +57,17 @@ COLLAPSE_WINDOW_TICKS = 20      # > voice_wait_seconds/interval so timeout fires
 # payload builders (shapes match backend/schemas.py exactly)
 # --------------------------------------------------------------------------- #
 def mat_frame(danger=False, nobody=False):
-    """64 comma-separated ints, 16x4 row-major, 12-bit range.
+    """72 comma-separated ints, 12x6 row-major, 12-bit range.
 
     nobody=True models an empty bathroom (scald scenario): calm noise floor
     even while the tap runs — that absence-of-pressure is what lets
     cross_modal.scald_shutoff_confirmed pass."""
+    from backend.schemas import MAT_CELL_COUNT
     if nobody:
-        vals = [random.randint(0, 400) for _ in range(64)]
+        vals = [random.randint(0, 400) for _ in range(MAT_CELL_COUNT)]
     else:
         vals = [random.randint(2800, 3800) if danger else random.randint(0, 400)
-                for _ in range(64)]
+                for _ in range(MAT_CELL_COUNT)]
     return ",".join(map(str, vals))
 
 

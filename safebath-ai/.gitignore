@@ -27,5 +27,8 @@ deployment/raspberry_pi/install.conf
 frontend/node_modules/
 frontend/dist/
 
+# per-machine API override — see frontend/config.example.js
+frontend/config.local.js
+
 # keep directory structure
 !**/.gitkeep

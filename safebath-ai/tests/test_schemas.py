@@ -4,6 +4,8 @@ from pydantic import ValidationError
 
 from backend.schemas import (
     MAT_CELL_COUNT,
+    MAT_COLS,
+    MAT_ROWS,
     AudioEventPayload,
     MatFramePayload,
     RadarStatusPayload,
@@ -13,32 +15,38 @@ from backend.schemas import (
     parse_for_topic,
 )
 
-VALID_CSV = ",".join(["100"] * 64)
+VALID_CSV = ",".join(["100"] * MAT_CELL_COUNT)
 
 
 class TestMatFrame:
     def test_valid_csv(self):
         p = MatFramePayload.from_csv(VALID_CSV)
-        assert len(p.values) == MAT_CELL_COUNT == 64
+        assert len(p.values) == MAT_CELL_COUNT == 72
         assert p.as_grid()[0][0] == 100
+
+    def test_grid_geometry(self):
+        assert (MAT_ROWS, MAT_COLS) == (12, 6)
+        p = MatFramePayload.from_csv(VALID_CSV)
+        grid = p.as_grid()
+        assert len(grid) == 12 and len(grid[0]) == 6
 
     def test_wrong_length_fails(self):
         with pytest.raises((ValidationError, ValueError)):
-            MatFramePayload.from_csv(",".join(["1"] * 63))
+            MatFramePayload.from_csv(",".join(["1"] * (MAT_CELL_COUNT - 1)))
 
     def test_out_of_range_adc_fails(self):
-        bad = ",".join(["4095"] * 63 + ["5000"])
+        bad = ",".join(["4095"] * (MAT_CELL_COUNT - 1) + ["5000"])
         with pytest.raises(ValidationError):
             MatFramePayload.from_csv(bad)
 
     def test_non_int_csv_fails(self):
         with pytest.raises((ValidationError, ValueError)):
-            MatFramePayload.from_csv("a,b," + ",".join(["1"] * 61))
+            MatFramePayload.from_csv("a,b," + ",".join(["1"] * (MAT_CELL_COUNT - 2)))
 
     def test_json_form_accepted(self):
         import json
-        raw = json.dumps({"values": [0] * 64})
-        assert len(parse_for_topic("sensor/mat/frame", raw).values) == 64
+        raw = json.dumps({"values": [0] * MAT_CELL_COUNT})
+        assert len(parse_for_topic("sensor/mat/frame", raw).values) == MAT_CELL_COUNT
 
 
 class TestRadar:
