@@ -27,9 +27,9 @@
 #include <arduinoFFT.h>
 
 const char* device_id = "audio-01";         // must match SAFEBATH_DEVICES
-const char* ssid = "YOUR_ROUTER_SSID";
-const char* password = "YOUR_ROUTER_PASSWORD";
-const char* server_host = "192.168.1.50";   // RPi IP running the edge API
+const char* ssid = "OnePlus 5";
+const char* password = "Yatslove";
+const char* server_host = "192.168.43.66";   // RPi IP running the edge API
 const uint16_t server_port = 8000;
 const char* node_token = "";                // optional; matches device token
 
@@ -127,9 +127,11 @@ void extractFeaturesChunk() {
 String classify(float rms, float zcr, float centroid) {
   if (rms < TH_SILENCE_RMS) return "silence";
   if (centroid < TH_THUD_CENTROID && zcr < TH_WATER_ZCR) return "impact_thud";
-  if (zcr > TH_WATER_ZCR && centroid > TH_THUD_CENTROID) return "water";
-  if (rms > TH_SPEECH_RMS) return "speech_or_cry";
-  return "water";   // residual mid-energy hissy signal defaults to water
+  if (zcr > TH_WATER_ZCR) return "water_sound";
+  if (rms > TH_SPEECH_RMS * 1.2f && centroid > 350.0f) return "cry_or_scream";
+  if (rms > TH_SPEECH_RMS) return "ordinary_speech";
+  if (zcr > 0.08f) return "background_noise";
+  return "background_noise";
 }
 
 /* ------------------- Voice Bridge reply heuristics ---------------------- */

@@ -17,6 +17,7 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { healthFailureMessage, resolveApiBase, resolveApiInfo } from "./apiBase.mjs";
+import { MatZonesCard, matModeFromSnapshot } from "./matZones.mjs";
 
 const API_BASE = resolveApiBase();
 const API_INFO = resolveApiInfo();
@@ -530,6 +531,16 @@ function SafeBathAppInner() {
   const audio = mode === "live" ? parseJsonSafe(snap.modules?.audio?.value) : snap.audio;
   const tof = mode === "live" ? parseJsonSafe(snap.modules?.tof?.value) : snap.tof;
 
+  /* Four-zone mat: only shown when the backend explicitly reports four-zone
+   * mode, so legacy 72-cell telemetry never renders as a 2x2 grid. */
+  const matMode = mode === "live" ? matModeFromSnapshot(snap) : "grid";
+  const matDevice = Array.isArray(snap.devices)
+    ? snap.devices.find((d) => d.device_id === "mat-01" || d.module === "mat")
+    : null;
+  const matError = mode === "live" && !liveStatus
+    ? (liveError || "api-unreachable") : null;
+  const matLoading = mode === "live" && !snap.mat_zones && !matError;
+
   const bandColor = snap.band === "high" ? "#ef4444" : snap.band === "watch" ? "#f59e0b" : "#22c55e";
 
   const liveEvents = mode === "live"
@@ -601,7 +612,22 @@ function SafeBathAppInner() {
 
       {/* module grid */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 16 }}>
-        <MatCard frameValues={matValues} recentFrames={recentFrames} />
+        {matMode === "four_zone" ? (
+          <Card title="Board 1 — Pressure Mat"
+            subtitle="sensor/mat/zones · 2×2 four-zone · raw ADC per zone"
+            danger={false}>
+            <MatZonesCard
+              zones={snap.mat_zones?.zones}
+              calibration={snap.mat_zones?.calibration}
+              matTs={snap.mat_zones?.ts}
+              deviceStatus={matDevice?.status}
+              error={matError}
+              loading={matLoading}
+            />
+          </Card>
+        ) : (
+          <MatCard frameValues={matValues} recentFrames={recentFrames} />
+        )}
 
         <RadarCard radar={radar} />
 
@@ -612,7 +638,7 @@ function SafeBathAppInner() {
           <div style={{ fontSize: 11, color: "#64748b", marginTop: 6 }}>hour_of_day: {toilet?.hour_of_day ?? "—"} · Medium severity only</div>
         </Card>
 
-        <Card title="Board 4 — Acoustic Distress" subtitle="MAX4466 → RMS/ZCR/centroid classifier" danger={audio?.label === "impact_thud" || audio?.label === "speech_or_cry"}>
+        <Card title="Board 4 — Acoustic Distress" subtitle="MAX4466 → RMS/ZCR/centroid classifier" danger={audio?.label === "impact_thud" || audio?.label === "cry_or_scream"}>
           <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 8 }}>{audio?.label ?? "—"}</div>
           <Bar label="energy" value={audio?.energy ?? 0} max={1} unit="" />
           <div style={{ fontSize: 11, color: "#64748b" }}>raw audio never leaves the node — labels only</div>

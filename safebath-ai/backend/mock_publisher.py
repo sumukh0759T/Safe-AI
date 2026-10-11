@@ -48,7 +48,14 @@ import os as _os
 import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
-AUDIO_LABELS = ["silence", "water", "impact_thud", "speech_or_cry"]
+AUDIO_LABELS = [
+    "silence",
+    "background_noise",
+    "impact_thud",
+    "cry_or_scream",
+    "ordinary_speech",
+    "water_sound",
+]
 
 COLLAPSE_WINDOW_TICKS = 20      # > voice_wait_seconds/interval so timeout fires
 
@@ -106,7 +113,7 @@ def audio_event(danger=False, scenario="default", tick_in_window=0):
             # block its escalation — the radar confirms presence but NOT motion.
             label, energy = "impact_thud", 0.9
     else:
-        label = random.choices(AUDIO_LABELS, weights=[70, 20, 5, 5])[0]
+        label = random.choices(AUDIO_LABELS, weights=[40, 30, 5, 5, 15, 5])[0]
         energy = round(random.uniform(0.01, 0.25), 3)
     return json.dumps({"label": label, "energy": energy})
 

@@ -5,6 +5,9 @@ Section 2 where they differ).
 
 Differences vs the older spec, all deliberate:
  - mat frame is a 72-int CSV, 12 rows x 6 cols (row-major), per final wiring
+ - four-zone mat is a separate payload (Pressure4ZonePayload, exactly 4
+   non-negative finite readings) on its own topic so it never runs through the
+   72-cell length check; legacy 72-cell frames remain fully supported
  - toilet reading has NO temp_c (DS18B20 not in final wiring); kept optional
    so re-adding it later is a one-line change (Master Guide Section 12.1)
  - audio events are JSON {"label", "energy"} — MAX4466 is analog, energy is
@@ -12,6 +15,7 @@ Differences vs the older spec, all deliberate:
 
 Every backend consumer imports from here; malformed payloads must fail loudly.
 """
+import math
 from typing import List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -21,6 +25,15 @@ MAT_ROWS = 12          # CD4067 channels 0-11
 MAT_COLS = 6           # 74HC595 Q1-Q6
 MAT_CELL_COUNT = MAT_ROWS * MAT_COLS   # 72
 ADC_MAX = 4095         # 12-bit ESP32 ADC
+
+# ---- four-zone mat geometry ------------------------------------------------
+# The physical prototype changed from a 12x6 Velostat grid to four larger
+# sensing zones (2x2). Each zone is an independent electrode pair, so the
+# payload is four readings, NOT 72 cells. Keep this separate from the grid
+# constants above so nothing accidentally validates one against the other.
+MAT_ZONE_COUNT = 4
+MAT_ZONE_TOPIC = "sensor/mat/zones"    # distinct legacy topic for zone frames
+MAT_ZONE_SENSOR_TYPE = "pressure_4zone"
 
 
 class StrictModel(BaseModel):
@@ -53,6 +66,42 @@ class MatFramePayload(StrictModel):
         return cls(values=values)
 
 
+class Pressure4ZonePayload(StrictModel):
+    """Four-zone Velostat mat frame: one reading per zone.
+
+    Exactly four numeric, finite, non-negative ADC readings. `sensor_type`
+    is the explicit discriminator that keeps four-zone telemetry off the
+    72-cell validation path (see MAT_ZONE_TOPIC).
+
+    Values are raw ADC counts (ESP32 12-bit: 0..4095) unless a calibration
+    layer converts them; the contract deliberately does NOT impose an upper
+    bound so calibrated/scaled values remain representable. The frontend
+    labels them "ADC" and only shows a percentage when calibration exists.
+    """
+    sensor_type: Literal["pressure_4zone"] = MAT_ZONE_SENSOR_TYPE
+    zones: List[float] = Field(..., min_length=MAT_ZONE_COUNT,
+                               max_length=MAT_ZONE_COUNT)
+
+    @field_validator("zones")
+    @classmethod
+    def _valid_readings(cls, v):
+        for i, x in enumerate(v):
+            if not math.isfinite(x):
+                raise ValueError(f"zone {i + 1} is not finite: {x!r}")
+            if x < 0:
+                raise ValueError(f"zone {i + 1} is negative: {x!r}")
+        return v
+
+    @classmethod
+    def from_csv(cls, raw: str) -> "Pressure4ZonePayload":
+        try:
+            zones = [float(x) for x in raw.strip().split(",")]
+        except ValueError as e:
+            raise ValueError(
+                f"zone frame is not a CSV of numbers: {raw[:80]!r}") from e
+        return cls(zones=zones)
+
+
 class MatPirPayload(StrictModel):
     entry: bool
 
@@ -72,7 +121,14 @@ class ToiletReadingPayload(StrictModel):
     temp_c: Optional[float] = None   # pending DS18B20 decision — see module docstring
 
 
-AudioLabel = Literal["silence", "water", "impact_thud", "speech_or_cry"]
+AudioLabel = Literal[
+    "silence",
+    "background_noise",
+    "impact_thud",
+    "cry_or_scream",
+    "ordinary_speech",
+    "water_sound",
+]
 
 
 class AudioEventPayload(StrictModel):
@@ -101,6 +157,7 @@ class VoiceReplyPayload(StrictModel):
 # ---- topic registry --------------------------------------------------------
 TOPICS = {
     "sensor/mat/frame": MatFramePayload,
+    MAT_ZONE_TOPIC: Pressure4ZonePayload,
     "sensor/mat/pir": MatPirPayload,
     "sensor/radar/status": RadarStatusPayload,
     "sensor/toilet/reading": ToiletReadingPayload,
@@ -129,4 +186,9 @@ def parse_for_topic(topic: str, raw_payload: str) -> BaseModel:
         if stripped.startswith("{"):
             return MatFramePayload.model_validate_json(stripped)
         return MatFramePayload.from_csv(stripped)
+    if model is Pressure4ZonePayload:
+        stripped = raw_payload.strip()
+        if stripped.startswith("{"):
+            return Pressure4ZonePayload.model_validate_json(stripped)
+        return Pressure4ZonePayload.from_csv(stripped)
     return model.model_validate_json(raw_payload)
