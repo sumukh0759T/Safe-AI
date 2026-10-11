@@ -138,6 +138,38 @@ class TestAlertStateMachine:
         assert row["ts"] == 42.5 and row["to_state"] == "voice_pending"
 
 
+class TestFourZoneMat:
+    def _observe(self, e, zones, ts=1.0):
+        import json
+        raw = json.dumps({"sensor_type": "pressure_4zone", "zones": zones})
+        return e.observe("sensor/mat/zones", raw, ts)
+
+    def test_four_zone_frame_does_not_crash_and_is_recorded(self):
+        e = FusionEngine(now=lambda: 0.0)
+        r = self._observe(e, [1200, 2900, 600, 2100])
+        assert r is not None
+        assert list(e.mat_zone_frames)[-1] == [1200, 2900, 600, 2100]
+
+    def test_72_cell_rules_not_reused_for_four_zones(self):
+        # A saturated four-zone frame must NOT raise fall_risk via the grid
+        # sustained-pressure / centroid heuristics.
+        e = FusionEngine(now=lambda: 0.0)
+        for t in range(1, 6):
+            r = self._observe(e, [4095, 4095, 4095, 4095], ts=float(t))
+        assert r["flags"]["fall_risk"] is False
+        assert r["flags"]["possible_collapse"] is False
+
+    def test_scald_pressure_interlock_is_opt_in(self, monkeypatch):
+        import backend.fusion_engine as fe
+        e = FusionEngine(now=lambda: 0.0)
+        self._observe(e, [3000, 3000, 3000, 3000], ts=5.0)
+        assert getattr(e, "last_mat_pressure_ts", None) is None   # disabled by default
+        monkeypatch.setattr(fe, "MAT_ZONE_PRESSURE_SUM_ADC", 10_000.0)
+        e2 = FusionEngine(now=lambda: 0.0)
+        self._observe(e2, [3000, 3000, 3000, 3000], ts=5.0)
+        assert e2.last_mat_pressure_ts == 5.0
+
+
 class TestCrossModal:
     def test_event_triggered_biomarker(self):
         assert event_triggered_biomarker_sample(False, False) is False

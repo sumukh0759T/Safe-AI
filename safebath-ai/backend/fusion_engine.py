@@ -44,6 +44,21 @@ HIGH_SEVERITY_TRIGGERS = {"fall", "radar_collapse", "tof_collapse",
 # recalibrate against real Velostat frames during Phase A bring-up.
 MAT_PRESSURE_THRESHOLD = 67_500
 
+# Four-zone mat (Pressure4ZonePayload / sensor/mat/zones). The rule-based grid
+# heuristics below (MAT_PRESSURE_THRESHOLD, MAT_SUSTAIN_HIGH_SUM, CoP centroid
+# jump) are defined on the 12x6 geometry and are therefore NOT reused for four
+# zones — the sum/centroid of four zones means something different. The zone
+# frames are still recorded (so nothing errors and history is kept) and may
+# optionally feed the scald interlock via an explicit opt-in threshold:
+#   SAFEBATH_MAT_ZONE_PRESSURE_SUM_ADC (>0) -> summed zone ADC counts as
+#   "pressure present" for the unattended-hot-fill interlock. Default 0 =
+#   disabled (no invented threshold).
+try:
+    MAT_ZONE_PRESSURE_SUM_ADC = float(
+        os.environ.get("SAFEBATH_MAT_ZONE_PRESSURE_SUM_ADC", "0") or 0)
+except ValueError:
+    MAT_ZONE_PRESSURE_SUM_ADC = 0.0
+
 
 class FusionEngine:
     def __init__(self,
@@ -72,6 +87,7 @@ class FusionEngine:
 
         # --- rolling sensor state ---
         self.mat_frames: deque = deque(maxlen=20)
+        self.mat_zone_frames: deque = deque(maxlen=20)
         self.fall_streak = 0
         self.unsteady_since: Optional[float] = None
         # interim rule-based mat danger (ConvLSTM upgrade later; same flag)
@@ -233,6 +249,17 @@ class FusionEngine:
             if self.unsteady_since and \
                     rules.mat_unsteady_sustained(ts - self.unsteady_since):
                 flags["fall_risk"] = True   # Medium path — contributes to score only
+
+        elif topic == "sensor/mat/zones":
+            # Four-zone mat: record the frame but deliberately do NOT reuse the
+            # 72-cell rules (see MAT_ZONE_PRESSURE_SUM_ADC note above). This
+            # keeps the grid fall/centroid heuristics from mis-scoring a shape
+            # they were never calibrated for.
+            zones = data["zones"]
+            self.mat_zone_frames.append(zones)
+            if MAT_ZONE_PRESSURE_SUM_ADC > 0 and \
+                    sum(zones) > MAT_ZONE_PRESSURE_SUM_ADC:
+                self.last_mat_pressure_ts = ts
 
         elif topic == "sensor/radar/status":
             self.last_radar = data

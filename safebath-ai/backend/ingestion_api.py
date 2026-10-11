@@ -30,8 +30,14 @@ Envelope (all fields required, extra fields rejected):
 Payload shapes reuse the existing schemas.py contract (12x6 mat frame = 72 ints,
 radar presence/motion/stillness_ms/possible_collapse, toilet gas/voc/turbidity/
 hour_of_day + optional temp_c, audio label/energy, tof avg_thermal_c/flow_pulses/
-tof_collapse/unattended_hot_fill). Events carry mat {"entry": bool}, audio
-{"reply": "fine"|"help"|"no_response"} and tof {"prompt": "are_you_ok"}.
+tof_collapse/unattended_hot_fill). The mat module additionally accepts a
+four-zone frame via an explicit discriminator, routed to its own legacy topic:
+
+    payload {"sensor_type": "pressure_4zone", "zones": [4 readings]}
+        -> sensor/mat/zones   (validated by Pressure4ZonePayload)
+
+Events carry mat {"entry": bool}, audio {"reply": "fine"|"help"|"no_response"}
+and tof {"prompt": "are_you_ok"}.
 
 Behavior:
   * malformed JSON / envelope / payload  -> 400, recorded in invalid_events
@@ -56,8 +62,11 @@ from backend.db import get_conn
 from backend.device_manager import device_manager
 from backend.schemas import (
     AudioEventPayload,
+    MAT_ZONE_SENSOR_TYPE,
+    MAT_ZONE_TOPIC,
     MatFramePayload,
     MatPirPayload,
+    Pressure4ZonePayload,
     RadarStatusPayload,
     StrictModel,
     TofThermalStatusPayload,
@@ -208,12 +217,34 @@ TELEMETRY_TOPIC = {
 
 # payload schema per module for telemetry / event message types
 TELEMETRY_PAYLOAD = {
-    "mat": MatFramePayload,
+    "mat": MatFramePayload,          # default/legacy; see resolve_telemetry()
     "radar": RadarStatusPayload,
     "toilet": ToiletReadingPayload,
     "audio": AudioEventPayload,
     "tof": TofThermalStatusPayload,
 }
+
+
+def resolve_telemetry(module: str, payload: Any):
+    """Pick the (payload_model, legacy_topic) for a telemetry message.
+
+    The mat module has two valid shapes and we must NOT force four-zone
+    telemetry through MatFramePayload's 72-value check (or vice versa):
+
+      {"values": [72 ints]}                       -> sensor/mat/frame (grid)
+      {"sensor_type": "pressure_4zone", ...}      -> sensor/mat/zones (2x2)
+      {"zones": [4 readings]}                     -> sensor/mat/zones (2x2)
+
+    The explicit `sensor_type` discriminator is preferred; the `zones` key is
+    accepted as a convenience. Everything else resolves to the legacy topic.
+    """
+    if module == "mat" and isinstance(payload, dict):
+        if (payload.get("sensor_type") == MAT_ZONE_SENSOR_TYPE
+                or "zones" in payload):
+            return Pressure4ZonePayload, MAT_ZONE_TOPIC
+        return MatFramePayload, "sensor/mat/frame"
+    return TELEMETRY_PAYLOAD.get(module), TELEMETRY_TOPIC.get(module)
+
 
 EVENT_TOPIC = {
     "mat": "sensor/mat/pir",
@@ -234,6 +265,9 @@ def wire_format(topic: str, model: Any) -> str:
     d = model.model_dump(exclude_none=True)
     if topic == "sensor/mat/frame":
         return ",".join(str(v) for v in d["values"])
+    if topic == MAT_ZONE_TOPIC:
+        return json.dumps({"sensor_type": d["sensor_type"],
+                           "zones": d["zones"]})
     if topic == "voice/reply":
         return json.dumps({"reply": d["reply"]})
     if topic == "voice/trigger":
@@ -327,12 +361,11 @@ async def _ingest(request: Request, expected: str) -> JSONResponse:
     topic = None
     model = None
     if expected == "telemetry":
-        model = TELEMETRY_PAYLOAD.get(env.module)
+        model, topic = resolve_telemetry(env.module, env.payload)
         if model is None:
             _record_reject(db_path, ts, topic_prefix, raw,
                            f"unsupported_telemetry: {env.module}")
             return _reject(400, "unsupported_telemetry_for_module")
-        topic = TELEMETRY_TOPIC[env.module]
     elif expected == "event":
         model = EVENT_PAYLOAD.get(env.module)
         if model is None:

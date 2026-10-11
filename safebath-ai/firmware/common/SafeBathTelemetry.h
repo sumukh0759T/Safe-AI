@@ -6,6 +6,9 @@
  * and message_type strings must stay byte-for-byte in sync with the Python
  * contract*, and the payload JSON fragment each board builds must match the
  * payload schemas in backend/schemas.py (12x6 mat frame = 72 ints, etc.).
+ * The mat board may instead emit a four-zone frame
+ * {"sensor_type":"pressure_4zone","zones":[4 readings]} (see
+ * backend/schemas.py Pressure4ZonePayload) when built with MAT_ZONE_MODE=1.
  *
  * Each board builds a TelemetryMessage and serializes it to exactly:
  *

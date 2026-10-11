@@ -8,6 +8,8 @@ Response shape (superset of the spec — extra keys are additive, so the
 frontend contract stays stable):
   risk_score, band, state, modules{...}, events[...],
   mat_frame {values[72], rows, cols}, mat_frames_recent[[72], ...]  (CoP trail)
+  mat_mode ("grid"|"four_zone"), mat_zones {zones[4], calibration, ts}|null,
+  mat_zone_recent[[4], ...]
   risk_history [{ts, score}]
 If the DB is empty (bring-up day), a clearly-labeled mock seed is inserted once
 so Live mode demos end-to-end without hardware.
@@ -25,7 +27,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.db import DEFAULT_DB, get_conn, init_db
-from backend.schemas import MAT_CELL_COUNT, MAT_COLS, MAT_ROWS
+from backend.schemas import (MAT_CELL_COUNT, MAT_COLS, MAT_ROWS,
+                             MAT_ZONE_COUNT, MAT_ZONE_TOPIC)
 from backend.telemetry_store import init_telemetry
 
 from backend.caretaker_api import caretaker_app
@@ -136,6 +139,102 @@ def _cloud_status(db_path: str) -> dict:
     return supabase_sync.cloud_status(db_path)
 
 
+def _load_mat_zone_calibration():
+    """Optional per-zone calibration for the four-zone mat.
+
+    Read from SAFEBATH_MAT_ZONE_CALIBRATION (inline JSON) or
+    SAFEBATH_MAT_ZONE_CALIBRATION_FILE (path). Returns None when unconfigured,
+    which makes the dashboard show raw ADC + an explicit "Uncalibrated" badge
+    instead of inventing percentages. Expected shape:
+
+      {
+        "polarity": "increase",          # "increase" | "decrease" (global)
+        "zones": [
+          {"baseline": 120, "max": 3000},          # optional per-zone polarity
+          {"baseline": 120, "max": 3000},
+          {"baseline": 120, "max": 3000},
+          {"baseline": 120, "max": 3000}
+        ]
+      }
+
+    Nothing here is a measured value; operators must supply real baselines
+    from a bring-up session (see README). Malformed config degrades to None.
+    """
+    raw = os.environ.get("SAFEBATH_MAT_ZONE_CALIBRATION")
+    path = os.environ.get("SAFEBATH_MAT_ZONE_CALIBRATION_FILE")
+    if not raw and path and os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                raw = fh.read()
+        except OSError:
+            return None
+    if not raw:
+        return None
+    try:
+        cfg = json.loads(raw)
+        zones = cfg.get("zones")
+        if not isinstance(zones, dict) and not isinstance(zones, list):
+            return None
+        if isinstance(zones, list) and len(zones) != MAT_ZONE_COUNT:
+            return None
+        return cfg
+    except (ValueError, TypeError):
+        return None
+
+
+def _mat_state(conn: sqlite3.Connection) -> dict:
+    """Which mat shape is active + the latest four-zone frame.
+
+    Mode is decided by the most recently *inserted* mat event (id, not ts —
+    device clocks may be absent), so switching a mat between grid and four-zone
+    firmware flips the dashboard without deleting history. Legacy 72-cell frames
+    stay available under mat_frame regardless of mode.
+    """
+    last_zone = conn.execute(
+        "SELECT id, ts, payload FROM events WHERE topic=? "
+        "ORDER BY id DESC LIMIT 1", (MAT_ZONE_TOPIC,)).fetchone()
+    last_frame = conn.execute(
+        "SELECT id, ts, payload FROM events WHERE topic='sensor/mat/frame' "
+        "ORDER BY id DESC LIMIT 1").fetchone()
+
+    if last_zone is not None and (last_frame is None
+                                  or last_zone["id"] > last_frame["id"]):
+        mode = "four_zone"
+    elif last_frame is not None:
+        mode = "grid"
+    else:
+        mode = "grid"
+
+    mat_zones = None
+    recent = []
+    if last_zone is not None:
+        try:
+            parsed = json.loads(last_zone["payload"])
+            zones = [float(z) for z in parsed["zones"]]
+        except (ValueError, TypeError, KeyError):
+            zones = None
+        if zones is not None and len(zones) == MAT_ZONE_COUNT:
+            mat_zones = {
+                "sensor_type": "pressure_4zone",
+                "zones": zones,
+                "count": MAT_ZONE_COUNT,
+                "ts": last_zone["ts"],
+                "calibration": _load_mat_zone_calibration(),
+            }
+        for r in conn.execute(
+                "SELECT payload FROM events WHERE topic=? "
+                "ORDER BY id DESC LIMIT 24", (MAT_ZONE_TOPIC,)):
+            try:
+                z = [float(x) for x in json.loads(r["payload"])["zones"]]
+            except (ValueError, TypeError, KeyError):
+                continue
+            if len(z) == MAT_ZONE_COUNT:
+                recent.append(z)
+
+    return {"mode": mode, "mat_zones": mat_zones,
+            "mat_zone_recent": list(reversed(recent))}
+
+
 def _danger_level(topic: str, payload: str) -> str:
     try:
         data = json.loads(payload) if payload.strip().startswith("{") else {}
@@ -228,6 +327,8 @@ def latest():
     history = [{"ts": h["ts"], "score": h["score"]} for h in conn.execute(
         "SELECT ts, score FROM risk_state ORDER BY id DESC LIMIT 60")]
 
+    mat_state = _mat_state(conn)
+
     return {
         "risk_score": risk_row["score"] if risk_row else 0,
         "band": risk_row["band"] if risk_row else "normal",
@@ -237,6 +338,9 @@ def latest():
                     "ts": ts} for ts, t, p in events],
         "mat_frame": {"values": mat_values, "rows": MAT_ROWS, "cols": MAT_COLS},
         "mat_frames_recent": list(reversed(recent_frames)),
+        "mat_mode": mat_state["mode"],
+        "mat_zones": mat_state["mat_zones"],
+        "mat_zone_recent": mat_state["mat_zone_recent"],
         "risk_history": list(reversed(history)),
         # ---- additive fields (new client feature additions) ----------------
         "source": "real" if not _any_simulated(conn) else "simulated",

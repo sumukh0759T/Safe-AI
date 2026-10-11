@@ -6,8 +6,10 @@ from backend.schemas import (
     MAT_CELL_COUNT,
     MAT_COLS,
     MAT_ROWS,
+    MAT_ZONE_TOPIC,
     AudioEventPayload,
     MatFramePayload,
+    Pressure4ZonePayload,
     RadarStatusPayload,
     ToiletReadingPayload,
     TofThermalStatusPayload,
@@ -109,6 +111,51 @@ class TestTofVoice:
         assert VoiceReplyPayload(reply="fine").reply == "fine"
         with pytest.raises(ValidationError):
             VoiceReplyPayload(reply="maybe")
+
+
+class TestPressure4Zone:
+    def test_valid(self):
+        p = Pressure4ZonePayload(sensor_type="pressure_4zone",
+                                 zones=[1200, 2900, 600, 2100])
+        assert p.zones == [1200, 2900, 600, 2100]
+        assert p.sensor_type == "pressure_4zone"
+
+    def test_sensor_type_defaults(self):
+        assert Pressure4ZonePayload(zones=[0, 0, 0, 0]).sensor_type == \
+            "pressure_4zone"
+
+    def test_accepts_floats(self):
+        assert Pressure4ZonePayload(zones=[1.5, 2, 3, 4.25]).zones[3] == 4.25
+
+    def test_wrong_count_fails(self):
+        with pytest.raises(ValidationError):
+            Pressure4ZonePayload(zones=[1, 2, 3])
+        with pytest.raises(ValidationError):
+            Pressure4ZonePayload(zones=[1, 2, 3, 4, 5])
+
+    def test_negative_fails(self):
+        with pytest.raises(ValidationError):
+            Pressure4ZonePayload(zones=[1, -2, 3, 4])
+
+    def test_non_finite_fails(self):
+        with pytest.raises(ValidationError):
+            Pressure4ZonePayload(zones=[float("nan"), 2, 3, 4])
+        with pytest.raises(ValidationError):
+            Pressure4ZonePayload(zones=[float("inf"), 2, 3, 4])
+
+    def test_from_csv(self):
+        p = Pressure4ZonePayload.from_csv("1200,2900,600,2100")
+        assert p.zones == [1200, 2900, 600, 2100]
+
+    def test_parse_for_topic_json_and_csv(self):
+        import json
+        raw = json.dumps({"sensor_type": "pressure_4zone", "zones": [1, 2, 3, 4]})
+        assert parse_for_topic(MAT_ZONE_TOPIC, raw).zones == [1, 2, 3, 4]
+        assert parse_for_topic(MAT_ZONE_TOPIC, "1,2,3,4").zones == [1, 2, 3, 4]
+
+    def test_extra_field_fails(self):
+        with pytest.raises(ValidationError):
+            Pressure4ZonePayload(zones=[1, 2, 3, 4], values=[0] * 72)
 
 
 def test_parse_for_topic_unknown_topic():

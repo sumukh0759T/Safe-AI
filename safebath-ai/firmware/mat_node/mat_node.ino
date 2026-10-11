@@ -16,6 +16,15 @@
  * shift — verify that physical wiring maps Q1-Q6 to columns in that order.
  * (See scanMat()/driveColumn() below.)
  *
+ * FOUR-ZONE MODE (MAT_ZONE_MODE=1): the prototype may switch to four large
+ * Velostat zones (2x2). In that mode each zone's electrode pair is read on its
+ * own CD4067 channel and the 72-cell scanner/shift register is not used. The
+ * payload becomes {"sensor_type":"pressure_4zone","zones":[z1,z2,z3,z4]},
+ * matching backend/schemas.py Pressure4ZonePayload. The legacy 12x6 scanner is
+ * preserved untouched behind MAT_ZONE_MODE=0 (default).
+ * !! The four-zone hardware circuit is NOT yet validated — confirm the channel
+ * !! mapping and that a single read per zone tracks pressure before trusting it.
+ *
  * Libraries: none beyond the ESP32 core (HTTPClient + WiFi).
  */
 #include "../common/SafeBathNode.h"
@@ -32,6 +41,16 @@ safebath::Node node("mat-01", "mat", "1.0.0");
 // keep true until the Serial-only sanity check passes — firmware reads the
 // sensors and prints instead of touching the network entirely.
 #define DEBUG_SERIAL_ONLY false
+
+// --- mat sensing mode ------------------------------------------------------
+// 0 = legacy 12x6 Velostat grid (72 cells) — default, unchanged
+// 1 = four-zone mat (2x2) — emits {"sensor_type":"pressure_4zone","zones":[...]}
+#define MAT_ZONE_MODE 0
+
+#define MAT_ZONE_COUNT 4
+// PLACEHOLDER CD4067 channel mapping for zones 1..4. This MUST be changed to
+// match the physical four-zone build before flashing — it is not validated.
+static const int MAT_ZONE_CHANNELS[MAT_ZONE_COUNT] = {0, 1, 2, 3};
 
 // --- mux / shift register / PIR (final confirmed pins) ---
 #define MUX_S0 16
@@ -87,6 +106,26 @@ void scanMat() {
   }
 }
 
+/* Four-zone scan (MAT_ZONE_MODE=1): one CD4067 channel per zone, no column
+ * drive. UNVALIDATED — adjust MAT_ZONE_CHANNELS to the real build and confirm
+ * each channel responds to pressure on its zone. */
+void scanZones(int out[MAT_ZONE_COUNT]) {
+  for (int i = 0; i < MAT_ZONE_COUNT; i++) {
+    selectMuxChannel(MAT_ZONE_CHANNELS[i]);
+    delayMicroseconds(50);
+    out[i] = constrain((int)((analogRead(MUX_SIG) - CALIB_OFFSET) * CALIB_GAIN),
+                       0, 4095);
+  }
+}
+
+void printZones(const int zones[MAT_ZONE_COUNT]) {
+  Serial.print("--- mat 4-zone");
+  for (int i = 0; i < MAT_ZONE_COUNT; i++) {
+    Serial.printf("  Z%d=%d", i + 1, zones[i]);
+  }
+  Serial.printf("  pir=%d\n", digitalRead(PIR_PIN));
+}
+
 /* Prints the full 12x6 frame to the Serial Monitor (115200 baud) so every cell
  * value can be checked on the bench without the dashboard/backend.
  * Layout: row-major, R0..R11 = CD4067 channel = physical row; C0..C5 = drive
@@ -135,20 +174,41 @@ void setup() {
 bool lastPirState = false;
 
 void loop() {
+#if MAT_ZONE_MODE
+  int zones[MAT_ZONE_COUNT];
+  scanZones(zones);
+#else
   scanMat();
+#endif
 
   if (DEBUG_SERIAL_ONLY) {
-    // press each of the 72 intersections one at a time and confirm only that
-    // cell's reading jumps (Master Guide Section 2.1 step 8)
+    // press each sensing element and confirm only its reading jumps
+    // (Master Guide Section 2.1 step 8)
     static unsigned long lastPrint = 0;
     if (millis() - lastPrint > 500) {
       lastPrint = millis();
+#if MAT_ZONE_MODE
+      printZones(zones);
+#else
       printMatGrid();
+#endif
     }
     delay(50);
     return;   // skip WiFi entirely until Step 1 passes
   }
 
+#if MAT_ZONE_MODE
+  // {"sensor_type":"pressure_4zone","zones":[z1,z2,z3,z4]} — exactly the
+  // backend's Pressure4ZonePayload (routed to sensor/mat/zones, no 72-cell check)
+  String payload = "{\"sensor_type\":\"pressure_4zone\",\"zones\":[";
+  char buf[8];
+  for (int i = 0; i < MAT_ZONE_COUNT; i++) {
+    itoa(zones[i], buf, 10);
+    payload += buf;
+    if (i != MAT_ZONE_COUNT - 1) payload += ",";
+  }
+  payload += "]}";
+#else
   // one flat 72-int array, row-major — exactly the schema's {"values":[...]}
   String payload = "{\"values\":[";
   char buf[8];
@@ -162,6 +222,7 @@ void loop() {
     }
   }
   payload += "]}";
+#endif
   int code = 0;
   bool ok = node.telemetry(payload.c_str(), &code);
   Serial.printf("[mat] frame -> %s (code=%d)\n", ok ? "ok" : "failed", code);
@@ -172,11 +233,15 @@ void loop() {
     node.event(pir ? "{\"entry\": true}" : "{\"entry\": false}");
   }
 
-  // keep the cell values visible on the Serial Monitor while streaming too
+  // keep the readings visible on the Serial Monitor while streaming too
   static unsigned long lastGrid = 0;
   if (millis() - lastGrid > 1000) {
     lastGrid = millis();
+#if MAT_ZONE_MODE
+    printZones(zones);
+#else
     printMatGrid();
+#endif
   }
 
   delay(100);   // ~10 Hz frame rate

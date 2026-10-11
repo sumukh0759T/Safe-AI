@@ -148,6 +148,84 @@ re-run `sudo ./update.sh` on the Pi after backend changes (and re-flash
 `firmware/mat_node/mat_node.ino`), or `/api/latest` will keep reporting the old
 frame shape and the mat parser (12×6 = 72 values) will ignore it.
 
+## Four-zone pressure mat (2×2)
+
+The prototype can run a four-zone Velostat mat instead of the 12×6 grid. The
+four zones are independent electrode pairs laid out 2×2 (Zone 1 top-left,
+Zone 2 top-right, Zone 3 bottom-left, Zone 4 bottom-right).
+
+**Telemetry contract.** Four-zone frames use an explicit discriminator so they
+never go through the 72-cell check. They travel the SAME ingestion path as
+every other module (`POST /api/v1/telemetry`) and are stored on their own legacy
+topic `sensor/mat/zones`:
+
+```json
+{
+  "contract_version": 1,
+  "device_id": "mat-01",
+  "module": "mat",
+  "firmware_version": "1.3.0",
+  "boot_id": "A1B2C3D4E5F60718",
+  "sequence": 17,
+  "device_uptime_ms": 604800123,
+  "timestamp": 1699561234.5,
+  "message_type": "telemetry",
+  "sensor_status": "ok",
+  "payload": { "sensor_type": "pressure_4zone", "zones": [1200, 2900, 600, 2100] }
+}
+```
+
+Validation (`backend/schemas.py:Pressure4ZonePayload`): exactly four numeric,
+finite, non-negative readings; missing/extra zones, `NaN`/`Infinity`, negatives
+and non-numeric values are rejected with HTTP 400 `invalid_payload` (recorded in
+`invalid_events`). Device identity, timestamp, boot id, sequence dedup and
+device registration behave exactly as before. Legacy 72-cell frames are still
+accepted under `sensor/mat/frame` and historical events are untouched.
+
+**API.** `GET /api/latest` now also returns:
+- `mat_mode`: `"four_zone"` or `"grid"` (decided by the most recently inserted
+  mat event, so switching firmware flips the dashboard without deleting data),
+- `mat_zones`: `{sensor_type, zones[4], count, ts, calibration}` or `null`,
+- `mat_zone_recent`: recent four-zone frames.
+The legacy `mat_frame` / `mat_frames_recent` (72 values) stay available.
+
+**Dashboard.** When `mat_mode == "four_zone"` the Board-1 card renders a
+responsive 2×2 grid (`frontend/matZones.mjs` → `MatZonesCard`) with a fixed
+label, the raw ADC reading, the normalized response % (only when calibrated),
+the state (No Pressure / Low / Medium / High), and a stale/offline/API-error
+indicator. Colors run cool (low) → intermediate (medium) → warm (high), with
+grey for unavailable/stale/uncalibrated. Otherwise the legacy 12×6 heatmap is
+shown unchanged, so a 72-cell frame can never render as four zones.
+
+**Calibration / normalization.** Percentages are opt-in. Without calibration the
+card shows raw ADC and an explicit "Uncalibrated" state (no invented values).
+Supply per-zone calibration via env (inline JSON or a file):
+
+```bash
+# SAFEBATH_MAT_ZONE_CALIBRATION='{"polarity":"increase","zones":[
+#   {"baseline":120,"max":3000},{"baseline":120,"max":3000},
+#   {"baseline":120,"max":3000},{"baseline":120,"max":3000}]}'
+# or SAFEBATH_MAT_ZONE_CALIBRATION_FILE=/path/calibration.json
+```
+
+`baseline` = no-pressure ADC, `max` = full-response ADC, `polarity` =
+`"increase"` (reading rises with pressure) or `"decrease"` (reading falls);
+per-zone `polarity` overrides the global default. Band defaults live in
+`frontend/matZones.mjs` (`< 25` Low, `< 60` Medium, else High).
+
+**Fusion / alerts.** `sensor/mat/zones` frames are recorded but the 72-cell
+rule-based grid heuristics (sustained-pressure sum, CoP centroid jump) are
+explicitly NOT reused for four zones. The scald interlock can opt in to a
+four-zone "pressure present" signal with
+`SAFEBATH_MAT_ZONE_PRESSURE_SUM_ADC` (default `0` = disabled).
+
+**Firmware.** `firmware/mat_node/mat_node.ino` has `MAT_ZONE_MODE` (default `0`
+= legacy 12×6). Set it to `1` to emit four-zone frames. **This is not yet
+hardware-validated**: `MAT_ZONE_CHANNELS` is a placeholder CD4067 channel map
+that must be matched to the physical build, and a single `analogRead` per zone
+must be confirmed to track pressure before it is trusted. GPIO assignments and
+the HTTP/boot-id/sequence contract are unchanged.
+
 ## Caretaker PWA (push + offline acks)
 
 `frontend/caretaker.html` is an installable PWA backed by `caretaker_api.py`
