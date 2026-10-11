@@ -252,6 +252,13 @@ emergencies, and can deliver Web Push (VAPID keys via env; delivery requires
 `pywebpush`). Acknowledgements made while offline are queued and replayed on
 reconnect.
 
+## Module 5 voice-test status
+
+Module 4 currently sends sound labels and energy, not raw microphone samples;
+its voice result is a heuristic, not speech recognition. Module 5's DFPlayer
+plays prerecorded SD track 1, not arbitrary AI audio. The current text-only,
+opt-in AI test and verified blockers are documented in `MODULE_5_SETUP.md`.
+
 ## Hardware bring-up
 
 Follow `NEXT_STEPS_FOR_YOU.md` — per-board Serial-first verification

@@ -38,12 +38,14 @@ from backend.telemetry_store import init_telemetry
 
 from backend.caretaker_api import caretaker_app
 from backend.ingestion_api import api_v1_router
+from backend.voice_test_api import router as voice_test_router
 
 app = FastAPI(title="SafeBath AI")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                    allow_headers=["*"])
 app.mount("/caretaker", caretaker_app)
 app.include_router(api_v1_router)
+app.include_router(voice_test_router)
 
 DB_PATH = os.environ.get("SQLITE_PATH", DEFAULT_DB)
 # device health windows (seconds since last message)
