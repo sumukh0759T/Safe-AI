@@ -95,6 +95,26 @@ function mockFrame(t, mode) {
   return values;
 }
 
+/* Four sample zones for the demo (2x2). Purely simulated, same phase as the
+ * grid so both views tell the same story. Calibration below is demo-only. */
+function mockZones(t, mode) {
+  const peak = mode === "fall" ? 3200 : mode === "unsteady" ? 1500 : 900;
+  const focus = Math.floor(t / 20) % 4;             // which zone is loaded now
+  return [0, 1, 2, 3].map((i) => Math.round(clamp(
+    120 + (i === focus ? peak : peak * 0.15) + 45 * Math.sin(t * 0.6 + i),
+    0, 4095)));
+}
+
+const MOCK_ZONE_CALIBRATION = {
+  polarity: "increase",
+  zones: [
+    { baseline: 120, max: 3000 },
+    { baseline: 120, max: 3000 },
+    { baseline: 120, max: 3000 },
+    { baseline: 120, max: 3000 },
+  ],
+};
+
 function makeMockSnapshot() {
   const t = Date.now() / 1000;
   const phase = Math.floor(t / 20) % 4;             // cycles normal/unsteady/fall/water
@@ -104,6 +124,16 @@ function makeMockSnapshot() {
   return {
     ts: t,
     mat_frame: { values: frame, rows: MAT_ROWS, cols: MAT_COLS },
+    /* prototype mat is now the 2x2 four-zone layout; grid stays available */
+    mat_mode: "four_zone",
+    mat_zones: {
+      sensor_type: "pressure_4zone",
+      zones: mockZones(t, collapse ? "fall" : mode),
+      count: 4,
+      ts: t,
+      calibration: MOCK_ZONE_CALIBRATION,
+    },
+    mat_zone_recent: [],
     radar: {
       presence: true,
       motion: !collapse && Math.random() > 0.25,
@@ -166,8 +196,29 @@ const IconWifi = ({ ok }) => (
   </svg>
 );
 
+/* Manual override so the 2x2 layout can be inspected without waiting for
+ * four-zone telemetry to arrive (useful during bring-up / review). */
+function MatViewToggle({ value, onChange }) {
+  const btn = (v, label) => (
+    <button key={v} onClick={() => onChange(v)} style={{
+      fontSize: 11, padding: "3px 8px", borderRadius: 6, cursor: "pointer",
+      border: `1px solid ${value === v ? "#38bdf8" : "#334155"}`,
+      background: value === v ? "#0c4a6e" : "#0b1220",
+      color: value === v ? "#e0f2fe" : "#94a3b8",
+    }}>{label}</button>
+  );
+  return (
+    <div style={{ display: "flex", gap: 6, marginBottom: 10, alignItems: "center" }}>
+      <span style={{ fontSize: 11, color: "#64748b" }}>view:</span>
+      {btn("four_zone", "4-zone")}
+      {btn("grid", "72-cell grid")}
+      {btn("auto", "auto")}
+    </div>
+  );
+}
+
 /* Board 1: heatmap + CoP trail + numeric overlay */
-function MatCard({ frameValues, recentFrames }) {
+function MatCard({ frameValues, recentFrames, headerExtra }) {
   const canvasRef = useRef(null);
   const [overlay, setOverlay] = useState(false);
   const cellW = 44, cellH = 26;
@@ -219,6 +270,7 @@ function MatCard({ frameValues, recentFrames }) {
   return (
     <Card title="Board 1 — Pressure Mat" subtitle="sensor/mat/frame · 12×6 · ConvLSTM fall-risk"
       danger={false}>
+      {headerExtra}
       <canvas ref={canvasRef} width={MAT_COLS * cellW} height={MAT_ROWS * cellH}
         style={{ width: "100%", imageRendering: "pixelated", borderRadius: 8, background: "#0b1220" }} />
       <label style={{ fontSize: 11, color: "#94a3b8", display: "inline-flex", gap: 6, alignItems: "center", marginTop: 8 }}>
@@ -468,6 +520,7 @@ function SafeBathAppInner() {
   const [snap, setSnap] = useState(() => makeMockSnapshot());
   const [log, setLog] = useState([]);
   const [history, setHistory] = useState([]);
+  const [matView, setMatView] = useState("auto");   // "auto" | "grid" | "four_zone"
 
   /* Live polling */
   useEffect(() => {
@@ -531,15 +584,20 @@ function SafeBathAppInner() {
   const audio = mode === "live" ? parseJsonSafe(snap.modules?.audio?.value) : snap.audio;
   const tof = mode === "live" ? parseJsonSafe(snap.modules?.tof?.value) : snap.tof;
 
-  /* Four-zone mat: only shown when the backend explicitly reports four-zone
-   * mode, so legacy 72-cell telemetry never renders as a 2x2 grid. */
-  const matMode = mode === "live" ? matModeFromSnapshot(snap) : "grid";
+  /* Four-zone mat: which layout to draw. `auto` follows the backend (live) or
+   * the simulated snapshot (mock); the toggle can force either view. Legacy
+   * 72-cell telemetry is never mistaken for a 2x2 mat under `auto`. */
+  const detectedMatMode = mode === "live"
+    ? matModeFromSnapshot(snap)
+    : (snap.mat_mode === "four_zone" ? "four_zone" : "grid");
+  const matMode = matView === "auto" ? detectedMatMode : matView;
   const matDevice = Array.isArray(snap.devices)
     ? snap.devices.find((d) => d.device_id === "mat-01" || d.module === "mat")
     : null;
   const matError = mode === "live" && !liveStatus
     ? (liveError || "api-unreachable") : null;
   const matLoading = mode === "live" && !snap.mat_zones && !matError;
+  const matToggle = <MatViewToggle value={matView} onChange={setMatView} />;
 
   const bandColor = snap.band === "high" ? "#ef4444" : snap.band === "watch" ? "#f59e0b" : "#22c55e";
 
@@ -616,6 +674,7 @@ function SafeBathAppInner() {
           <Card title="Board 1 — Pressure Mat"
             subtitle="sensor/mat/zones · 2×2 four-zone · raw ADC per zone"
             danger={false}>
+            {matToggle}
             <MatZonesCard
               zones={snap.mat_zones?.zones}
               calibration={snap.mat_zones?.calibration}
@@ -626,7 +685,8 @@ function SafeBathAppInner() {
             />
           </Card>
         ) : (
-          <MatCard frameValues={matValues} recentFrames={recentFrames} />
+          <MatCard frameValues={matValues} recentFrames={recentFrames}
+            headerExtra={matToggle} />
         )}
 
         <RadarCard radar={radar} />
