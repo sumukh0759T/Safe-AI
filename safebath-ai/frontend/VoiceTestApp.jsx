@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { resolveApiBase } from "./apiBase.mjs";
+import { approvedPromptForUtterance } from "./voiceOutput.mjs";
 
 const API_BASE = resolveApiBase();
 const API_HEALTH = `${API_BASE}/api/v1/health`;
@@ -51,6 +52,7 @@ export default function VoiceTestApp({ embedded = false }) {
   const [messages, setMessages] = useState([]);
   const [sessionId, setSessionId] = useState(newSessionId);
   const [speakResponse, setSpeakResponse] = useState(true);
+  const [outputMode, setOutputMode] = useState("browser");
   const [interim, setInterim] = useState("");
   const [listeningSupported, setListeningSupported] = useState(true);
   const [synthesisSupported, setSynthesisSupported] = useState(true);
@@ -61,6 +63,7 @@ export default function VoiceTestApp({ embedded = false }) {
   const [remoteCommand, setRemoteCommand] = useState(null);
   const [remoteError, setRemoteError] = useState("");
   const [remoteSending, setRemoteSending] = useState(false);
+  const [hardwareConfirmed, setHardwareConfirmed] = useState(false);
   const recognitionRef = useRef(null);
   const activeRef = useRef(true);
   const intentionalStopRef = useRef(false);
@@ -83,6 +86,7 @@ export default function VoiceTestApp({ embedded = false }) {
   useEffect(() => {
     if (!remoteCommand?.event_id || ["completed", "failed", "timed_out"].includes(remoteCommand.status)) return undefined;
     let active = true;
+    let timer;
     const pollStatus = async () => {
       try {
         const response = await fetch(`${API_VOICE_COMMANDS}/${encodeURIComponent(remoteCommand.event_id)}`, {
@@ -97,10 +101,10 @@ export default function VoiceTestApp({ embedded = false }) {
       } catch (err) {
         if (active && err.name !== "AbortError") setRemoteError(err.message || "Could not read DFPlayer command status.");
       }
+      if (active) timer = setTimeout(pollStatus, 1200);
     };
     void pollStatus();
-    const timer = setInterval(pollStatus, 1200);
-    return () => { active = false; clearInterval(timer); };
+    return () => { active = false; clearTimeout(timer); };
   }, [remoteCommand?.event_id, remoteCommand?.status, token]);
 
   function addMessage(role, text, extra = {}) {
@@ -110,11 +114,15 @@ export default function VoiceTestApp({ embedded = false }) {
     }]);
   }
 
-  async function queueRemotePrompt() {
+  async function queuePrompt(promptId) {
     setRemoteError("");
+    if (!hardwareConfirmed) {
+      setRemoteError("Before sending, verify that registered device tof-01 is the physical ESP32 wired to the DFPlayer. Its device ID alone cannot prove the hardware identity.");
+      return false;
+    }
     if (!token.trim()) {
       setRemoteError("Enter the voice-test bearer token before queueing a speaker test.");
-      return;
+      return false;
     }
     setRemoteSending(true);
     setRemoteCommand(null);
@@ -126,18 +134,22 @@ export default function VoiceTestApp({ embedded = false }) {
           Authorization: `Bearer ${token}`,
           Accept: "application/json",
         },
-        body: JSON.stringify({ prompt_id: Number(remotePromptId), device_id: "tof-01" }),
+        body: JSON.stringify({ prompt_id: Number(promptId), device_id: "tof-01" }),
       });
       if (!response.ok) throw new Error(errorForStatus(response.status));
       setRemoteCommand(await response.json());
+      return true;
     } catch (err) {
       setRemoteError(err instanceof TypeError
         ? `Could not reach ${API_BASE}. Check the network and backend status.`
         : err.message || "Could not queue the DFPlayer command.");
+      return false;
     } finally {
       setRemoteSending(false);
     }
   }
+
+  async function queueRemotePrompt() { return queuePrompt(remotePromptId); }
 
   async function testBackend() {
     setError("");
@@ -200,7 +212,17 @@ export default function VoiceTestApp({ embedded = false }) {
       if (!activeRef.current || aborter.signal.aborted) return;
       addMessage("assistant", data.reply_text.trim(), { alertSent: data.alert_sent === true });
       setBackend({ label: "Reachable", tone: "good" });
-      if (speakResponse && window.speechSynthesis && window.SpeechSynthesisUtterance) {
+      if (outputMode === "bathroom") {
+        const promptId = approvedPromptForUtterance(text);
+        if (promptId) {
+          const prompt = API_VOICE_PROMPTS.find((item) => item.id === promptId);
+          const queued = await queuePrompt(promptId);
+          addMessage("system", queued ? `Bathroom speaker: queued prerecorded clip “${prompt.label}”. This is not Gemini speech.` : "Bathroom speaker: prompt was not queued.");
+        } else {
+          addMessage("system", "Bathroom speaker: no approved prerecorded prompt matched this message; nothing was played.");
+        }
+        setState("Idle");
+      } else if (speakResponse && window.speechSynthesis && window.SpeechSynthesisUtterance) {
         window.speechSynthesis.cancel();
         const utterance = new window.SpeechSynthesisUtterance(data.reply_text.trim());
         utterance.lang = "en-IN";
@@ -439,6 +461,7 @@ export default function VoiceTestApp({ embedded = false }) {
             </button>
           </div>
           <p style={styles.small}>Audio only. The command does not operate the relay, valve, door lock, or emergency alert.</p>
+          <label style={{ ...styles.toggle, display: "block", marginTop: 10 }}><input type="checkbox" checked={hardwareConfirmed} onChange={(event) => setHardwareConfirmed(event.target.checked)} /> I verified that tof-01 is physically connected to the DFPlayer speaker.</label>
           {remoteCommand && <div aria-live="polite" role="status" style={styles.commandStatus}>
             <strong>{remoteCommand.status === "queued" ? "Waiting for device — command queued"
               : remoteCommand.status === "claimed" ? "Device claimed command — waiting for receipt acknowledgement"
@@ -460,8 +483,9 @@ export default function VoiceTestApp({ embedded = false }) {
         <section aria-label="Conversation controls" style={styles.card}>
           <div style={styles.sectionTop}>
             <div><h2 style={styles.h2}>Conversation</h2><p style={styles.small}>Session <code style={styles.code}>{sessionId.slice(0, 22)}…</code></p></div>
-            <label style={styles.toggle}><input type="checkbox" checked={speakResponse} onChange={(event) => setSpeakResponse(event.target.checked)} /> Speak Response</label>
+            <label style={styles.label}>Response output <select aria-label="Response output" value={outputMode} onChange={(event) => setOutputMode(event.target.value)} style={styles.input}><option value="browser">Browser speaks AI text</option><option value="bathroom">Bathroom speaker uses prerecorded prompts</option></select></label>
           </div>
+          {outputMode === "browser" ? <label style={styles.toggle}><input type="checkbox" checked={speakResponse} onChange={(event) => setSpeakResponse(event.target.checked)} /> Speak Response</label> : <p style={styles.small}>The ESP32 plays only an allowlisted prerecorded prompt selected from your message. Gemini text stays in chat and is never sent to the DFPlayer.</p>}
           <div style={styles.controls}>
             <button type="button" onClick={checkMicrophone} style={styles.secondaryButton}>Check Microphone</button>
             <button type="button" onClick={testSpeaker} style={styles.secondaryButton}>Test Speaker</button>

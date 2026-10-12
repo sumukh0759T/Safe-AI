@@ -12,6 +12,7 @@ Run alongside api_server (same uvicorn process):
   app.mount("/caretaker", caretaker_app)
 """
 import json
+import hmac
 import os
 import sqlite3
 import sys
@@ -20,15 +21,26 @@ from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from backend.db import DEFAULT_DB, get_conn, init_db
 from backend import emergency
 from backend import push_service
 
 DB_PATH = os.environ.get("SQLITE_PATH", DEFAULT_DB)
+CARETAKER_TOKEN = os.environ.get("SAFEBATH_CARETAKER_TOKEN", "").strip()
 
 caretaker_app = FastAPI(title="SafeBath Caretaker")
+
+
+def _require_caretaker(authorization: Optional[str]) -> str:
+    """Mutating caretaker actions are disabled until a shared token is set."""
+    if not CARETAKER_TOKEN:
+        raise HTTPException(503, "Caretaker actions are disabled: configure SAFEBATH_CARETAKER_TOKEN")
+    scheme, _, supplied = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not hmac.compare_digest(supplied, CARETAKER_TOKEN):
+        raise HTTPException(401, "Valid caretaker bearer token required")
+    return "caretaker"
 
 # human-readable descriptions for each trigger
 _TRIGGER_MSG = {
@@ -84,7 +96,8 @@ def get_alerts(limit: int = 50, include_acknowledged: bool = True):
 
 
 @caretaker_app.post("/ack/{alert_id}")
-def acknowledge(alert_id: int, by: str = "caretaker"):
+def acknowledge(alert_id: int, authorization: Optional[str] = Header(default=None)):
+    by = _require_caretaker(authorization)
     conn = get_conn(DB_PATH)
     row = conn.execute("SELECT id,active,event_id FROM alerts WHERE id=?",
                        (alert_id,)).fetchone()
@@ -131,11 +144,12 @@ def get_emergencies(limit: int = 50, state: Optional[str] = None):
 
 
 @caretaker_app.post("/emergencies/{event_id}/ack")
-def acknowledge_emergency(event_id: str, by: str = "caretaker"):
+def acknowledge_emergency(event_id: str, authorization: Optional[str] = Header(default=None)):
     """Acknowledge an emergency event. This marks the *notification* handled;
     it does NOT claim the physical emergency ended (resolution is the fusion
     engine's separate decision). Local state updates instantly; the ack is
     queued for cloud sync and push deliveries are marked acknowledged."""
+    by = _require_caretaker(authorization)
     ok = emergency.acknowledge(DB_PATH, event_id, by=by)
     if not ok:
         raise HTTPException(404, "emergency event not found")
@@ -144,6 +158,14 @@ def acknowledge_emergency(event_id: str, by: str = "caretaker"):
     except Exception as e:
         print(f"[caretaker] delivery ack failed: {e}")
     return {"ok": True, "event_id": event_id, "state": "acknowledged"}
+
+
+@caretaker_app.post("/emergencies/{event_id}/resolve")
+def resolve_emergency(event_id: str, authorization: Optional[str] = Header(default=None)):
+    by = _require_caretaker(authorization)
+    if not emergency.resolve(DB_PATH, event_id, by=by):
+        raise HTTPException(404, "emergency event not found")
+    return {"ok": True, "event_id": event_id, "state": "resolved"}
 
 
 # --------------------------------------------------------------------------- #
@@ -190,6 +212,12 @@ def patient_status():
     last_alert = conn.execute(
         "SELECT id,ts,severity,trigger_name,message FROM alerts "
         "ORDER BY id DESC LIMIT 1").fetchone()
+    try:
+        # Share the same registry and freshness thresholds as the main status API.
+        from backend.api_server import _device_statuses
+        devices = _device_statuses(DB_PATH)
+    except Exception:
+        devices = []
     return {
         "risk_score": risk["score"] if risk else 0,
         "band": risk["band"] if risk else "normal",
@@ -198,6 +226,7 @@ def patient_status():
         "active_alerts": active,
         "last_alert": dict(last_alert) if last_alert else None,
         "last_risk_update": risk["ts"] if risk else 0,
+        "devices": devices,
     }
 
 

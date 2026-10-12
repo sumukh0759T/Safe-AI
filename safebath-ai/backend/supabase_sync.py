@@ -149,7 +149,7 @@ def _row_to_cloud(row: sqlite3.Row, kind: str) -> Dict[str, Any]:
     payload = json.loads(row["payload"] or "{}")
     return {
         "event_id": payload.get("event_id", row["event_id"]),
-        "state": "acknowledged",
+        "state": payload.get("status", "acknowledged"),
         "ack_ts": payload.get("ack_ts"),
         "ack_by": payload.get("by", "caretaker"),
     }

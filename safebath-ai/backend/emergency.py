@@ -59,7 +59,8 @@ def _primary_trigger(result: Dict) -> Tuple[str, str]:
     trigger = "unknown"
     for a in result.get("actions", []):
         if a.get("action") == "escalate_alert" and a.get("reason"):
-            trigger = a["reason"]
+            reason = a["reason"]
+            trigger = active_flags[0] if reason == "no_response_timeout" and active_flags else reason
             break
     else:
         if active_flags:
@@ -276,10 +277,12 @@ def acknowledge(db_path: str, target: str, by: str = "caretaker",
     conn = conn or get_conn(db_path)
     try:
         row = conn.execute(
-            "SELECT id FROM emergency_events WHERE event_id=?",
+            "SELECT id,state FROM emergency_events WHERE event_id=?",
             (target,)).fetchone()
         if not row:
             return False
+        if row["state"] == "resolved":
+            return True
         conn.execute(
             "UPDATE emergency_events SET state='acknowledged', ack_ts=?, "
             "ack_by=?, ack_count=ack_count+1 WHERE event_id=?",
@@ -295,3 +298,33 @@ def acknowledge(db_path: str, target: str, by: str = "caretaker",
     finally:
         if own:
             conn.close()
+
+
+def resolve(db_path: str, target: str, by: str = "caretaker",
+            now: Optional[float] = None) -> bool:
+    """Explicit caretaker resolution. This is separate from notification ack."""
+    from backend import outbox
+    now = now if now is not None else time.time()
+    conn = get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT id,state FROM emergency_events WHERE event_id=?", (target,)
+        ).fetchone()
+        if not row:
+            return False
+        if row["state"] == "resolved":
+            return True
+        conn.execute(
+            "UPDATE emergency_events SET state='resolved', resolved_at=?, "
+            "resolved_by=? WHERE event_id=?", (now, by, target))
+        conn.execute(
+            "UPDATE alerts SET active=0, acknowledged_at=COALESCE(acknowledged_at,?), "
+            "acknowledged_by=COALESCE(acknowledged_by,?) WHERE event_id=?",
+            (now, by, target))
+        conn.commit()
+        outbox.enqueue(db_path, "ack", row["id"], event_id=f"resolve-{target}",
+                       payload={"event_id": target, "by": by,
+                                "ack_ts": now, "status": "resolved"})
+        return True
+    finally:
+        conn.close()

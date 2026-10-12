@@ -99,6 +99,7 @@ class FusionEngine:
         self.uti_streak = 0
         self.dehyd_times: List[float] = []
         self.pending_reply_requested_at: Optional[float] = None
+        self.pending_flags: Dict[str, bool] = {}
         self.normal_band_ticks_in_alerting = 0
         self._flag_holds: Dict[str, float] = {}
 
@@ -150,6 +151,7 @@ class FusionEngine:
                 self._log_transition(actions, from_state, "alerting",
                                      "scald_shutoff_confirmed", ts)
             self.pending_reply_requested_at = None
+            self.pending_flags = {}
             self.normal_band_ticks_in_alerting = 0
             return self._result(ts, actions)
 
@@ -162,6 +164,7 @@ class FusionEngine:
                 self._log_transition(actions, from_state, "voice_pending",
                                      "high_severity_trigger", ts)
                 self.pending_reply_requested_at = ts
+                self.pending_flags = {k: True for k, value in flags.items() if value}
         elif self.state == "voice_pending":
             waited = ts - (self.pending_reply_requested_at or ts)
             if voice_reply == "fine":
@@ -169,11 +172,14 @@ class FusionEngine:
                 self._log_transition(actions, from_state, "resolved", "reply_fine", ts)
                 self.score = min(self.score, rules.SCORE_HIGH - 1.0)
                 self.band = rules.fusion_band(self.score)
+                self.pending_flags = {}
             elif voice_reply in ("help", "no_response") or \
                     waited > self.voice_wait_seconds:
                 reason = f"reply_{voice_reply}" if voice_reply else "no_response_timeout"
                 actions.append({"action": "escalate_alert", "channel": "telegram_push",
                                 "reason": reason, "ts": ts})
+                self.active_flags.update(self.pending_flags)
+                self.pending_flags = {}
                 self._log_transition(actions, from_state, "alerting", reason, ts)
         elif self.state == "alerting":
             self.normal_band_ticks_in_alerting = \
@@ -371,6 +377,18 @@ def load_optional_models():
     return toilet_model, fall_clf
 
 
+def idle_timeout_tick(engine: FusionEngine, ts: float) -> Optional[Dict]:
+    """Advance an already pending voice gate when no sensor events arrive."""
+    if engine.state != "voice_pending" or engine.pending_reply_requested_at is None:
+        return None
+    if ts - engine.pending_reply_requested_at <= engine.voice_wait_seconds:
+        return None
+    # Preserve the evidence that opened the gate for this final decision so
+    # the durable emergency keeps its trigger/device/severity context.
+    pending_flags = {name: value for name, value in engine.pending_flags.items() if value}
+    return engine.tick(pending_flags, set(), False, None, ts=ts)
+
+
 def main(db_path: str = DEFAULT_DB, poll_seconds: float = 1.0,
          once: bool = False, from_start: bool = False) -> None:
     init_db(db_path)
@@ -432,6 +450,29 @@ def main(db_path: str = DEFAULT_DB, poll_seconds: float = 1.0,
                   f"score={engine.score:.1f} band={engine.band} "
                   f"state={engine.state}")
             break
+        # Voice-response deadlines are wall-clock based, so advance the state
+        # machine even when telemetry has stopped arriving. This only resolves
+        # the already-observed pending event; missing telemetry is not a new
+        # fall or other sensor trigger.
+        if not rows:
+            result = idle_timeout_tick(engine, time.time())
+        else:
+            result = None
+        if result is not None:
+            flags_csv = ",".join(k for k, v in result["flags"].items() if v)
+            conn.execute("INSERT INTO risk_state(ts,score,band,state,active_flags) VALUES (?,?,?,?,?)",
+                         (result["ts"], result["score"], result["band"], result["state"], flags_csv))
+            for action in result["actions"]:
+                if action["action"] == "state_change":
+                    conn.execute("INSERT INTO state_log(ts,from_state,to_state,reason) VALUES (?,?,?,?)",
+                                 (action["ts"], action["from"], action["to"], action["reason"]))
+                    print(f"[fusion] {action['from']} -> {action['to']} ({action['reason']})")
+            conn.commit()
+            try:
+                from backend.caretaker_api import dispatch_alert
+                dispatch_alert(result, conn, db_path)
+            except Exception as e:
+                print(f"[fusion] idle timeout dispatch failed: {e}")
         if rows and time.time() - last_heartbeat >= 10.0:
             print(f"[fusion] alive | score={engine.score:.1f} "
                   f"band={engine.band} state={engine.state} | at event {last_id}")

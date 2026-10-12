@@ -16,7 +16,7 @@ from backend.cross_modal import (
     event_triggered_biomarker_sample,
     scald_shutoff_confirmed,
 )
-from backend.fusion_engine import FusionEngine
+from backend.fusion_engine import FusionEngine, idle_timeout_tick
 from backend.voice_bridge import attempt_voice_triage
 from datasets.gen_radar_stub_data import synthetic_radar_stream
 
@@ -116,6 +116,16 @@ class TestAlertStateMachine:
         r = e.tick(flags(), set(), False, voice_reply="help", ts=3.0)
         assert e.state == "alerting"
         assert any(a["action"] == "escalate_alert" for a in r["actions"])
+
+    def test_pending_gate_times_out_without_new_sensor_event(self):
+        e = FusionEngine(now=lambda: 0.0, voice_wait_seconds=12.0)
+        self._trigger(e, ts=1.0)
+        e.tick(flags(), set(), False, None, ts=5.0)
+        assert idle_timeout_tick(e, 12.0) is None
+        result = idle_timeout_tick(e, 13.1)
+        assert result["state"] == "alerting"
+        assert result["flags"]["tof_collapse"] is True
+        assert any(a["action"] == "escalate_alert" for a in result["actions"])
 
     def test_scald_is_immediate_no_voice_gate(self):
         e = FusionEngine(now=lambda: 0.0)

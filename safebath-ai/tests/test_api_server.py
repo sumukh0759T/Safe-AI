@@ -9,8 +9,29 @@ TestClient = pytest.importorskip("fastapi.testclient").TestClient
 @pytest.fixture()
 def client(tmp_db, monkeypatch):
     import backend.api_server as api
+    import backend.caretaker_api as caretaker
     monkeypatch.setattr(api, "DB_PATH", tmp_db)
+    monkeypatch.setattr(caretaker, "DB_PATH", tmp_db)
     return TestClient(api.app)
+
+
+def test_emergency_actions_require_token_and_resolve(client, tmp_db, monkeypatch):
+    from backend import emergency
+    import backend.caretaker_api as caretaker
+    monkeypatch.setattr(caretaker, "CARETAKER_TOKEN", "test-caretaker-token")
+    row, _ = emergency.create_if_new(tmp_db, {
+        "ts": 1000.0, "score": 70, "band": "high", "state": "alerting",
+        "flags": {"tof_collapse": True},
+        "actions": [{"action": "escalate_alert", "reason": "tof_collapse"}],
+    })
+    path = f"/caretaker/emergencies/{row['event_id']}"
+    assert client.post(path + "/ack").status_code == 401
+    headers = {"Authorization": "Bearer test-caretaker-token"}
+    assert client.post(path + "/ack", headers=headers).json()["state"] == "acknowledged"
+    assert client.post(path + "/resolve", headers=headers).json()["state"] == "resolved"
+    listed = client.get("/caretaker/emergencies").json()["emergencies"][0]
+    assert listed["state"] == "resolved"
+    assert listed["resolved_by"] == "caretaker"
 
 
 def test_latest_shape(client):

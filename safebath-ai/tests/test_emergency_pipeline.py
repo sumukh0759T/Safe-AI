@@ -77,6 +77,24 @@ def test_repeat_escalation_only_when_configured(tmp_db):
     assert created2 is True                    # 400s > 100s repeat threshold
 
 
+def test_explicit_resolution_is_durable_and_syncable(tmp_db):
+    emg, created = emergency.create_if_new(tmp_db, escalation_result())
+    assert created
+    assert emergency.acknowledge(tmp_db, emg["event_id"], by="test")
+    assert emergency.resolve(tmp_db, emg["event_id"], by="test", now=1200.0)
+    row = emergency.list_events(tmp_db)[0]
+    assert row["state"] == "resolved"
+    assert row["resolved_at"] == 1200.0
+    assert row["resolved_by"] == "test"
+    conn = __import__("backend.db", fromlist=["get_conn"]).get_conn(tmp_db)
+    try:
+        queued = conn.execute("SELECT event_id,payload FROM outbox WHERE event_id=?",
+                              (f"resolve-{emg['event_id']}",)).fetchone()
+        assert queued and json.loads(queued["payload"])["status"] == "resolved"
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------- #
 # dispatch_alert integration (what fusion_engine calls each tick)
 # --------------------------------------------------------------------------- #
@@ -180,6 +198,7 @@ def test_caretaker_ack_endpoints(tmp_db, monkeypatch):
     import backend.caretaker_api as ct
     monkeypatch.setattr(api, "DB_PATH", tmp_db)
     monkeypatch.setattr(ct, "DB_PATH", tmp_db)
+    monkeypatch.setattr(ct, "CARETAKER_TOKEN", "test-caretaker-token")
 
     from backend import caretaker_api
     eid = caretaker_api.dispatch_alert(escalation_result(), db_path=tmp_db)
@@ -189,7 +208,8 @@ def test_caretaker_ack_endpoints(tmp_db, monkeypatch):
     assert len(listed) == 1 and listed[0]["event_id"] == eid
     assert listed[0]["state"] == "active"
 
-    r = client.post(f"/caretaker/emergencies/{eid}/ack?by=carer")
+    r = client.post(f"/caretaker/emergencies/{eid}/ack",
+                    headers={"Authorization": "Bearer test-caretaker-token"})
     assert r.status_code == 200 and r.json()["state"] == "acknowledged"
     assert client.get("/caretaker/emergencies").json(
     )["emergencies"][0]["state"] == "acknowledged"

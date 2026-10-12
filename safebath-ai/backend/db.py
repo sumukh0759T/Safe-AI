@@ -70,6 +70,8 @@ CREATE TABLE IF NOT EXISTS emergency_events (
     local_alarm_fired INTEGER NOT NULL DEFAULT 0,
     ack_ts REAL,
     ack_by TEXT,
+    resolved_at REAL,
+    resolved_by TEXT,
     ack_count INTEGER NOT NULL DEFAULT 0,
     sync_status TEXT NOT NULL DEFAULT 'pending',
     synced_at REAL,
@@ -192,6 +194,8 @@ def init_db(db_path: str = DEFAULT_DB) -> None:
         conn.executescript(_SCHEMA)
         # forward migrations for pre-existing databases
         _ensure_column(conn, "alerts", "event_id", "TEXT")
+        _ensure_column(conn, "emergency_events", "resolved_at", "REAL")
+        _ensure_column(conn, "emergency_events", "resolved_by", "TEXT")
         _ensure_column(conn, "voice_requests", "played_by", "TEXT")
         _ensure_column(conn, "voice_requests", "played_at", "REAL")
         _ensure_column(conn, "voice_requests", "source", "TEXT NOT NULL DEFAULT 'sensor'")

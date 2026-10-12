@@ -5,7 +5,7 @@
  *   - Clean blue theme (#2D398B, #336AEA)
  *   - Rounded cards with subtle box shadows
  *   - Prominent SOS-style emergency indicators
- *   - Real-time location map (Leaflet + device GPS)
+ *   - Caretaker-device location only after explicit browser permission
  *   - Mobile-first responsive layout
  *
  * Features:
@@ -304,22 +304,28 @@ function queueAck(kind, id, by) {
   saveAcks(list);
   return list.length;
 }
-async function postAck(kind, id, by) {
+async function postAck(kind, id, by, token) {
   const by2 = encodeURIComponent(by || "caretaker");
   const url = kind === "emergency"
     ? `${API_BASE}/emergencies/${encodeURIComponent(id)}/ack?by=${by2}`
     : `${API_BASE}/ack/${id}?by=${by2}`;
-  const r = await fetch(url, { method: "POST" });
+  const r = await fetch(url, { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (r.status === 401 || r.status === 503) {
+    const error = new Error(r.status === 503 ? "Caretaker actions are disabled on the API; configure SAFEBATH_CARETAKER_TOKEN." : "Caretaker token was rejected. Check it and retry.");
+    error.authorizationFailure = true;
+    throw error;
+  }
   // 404/409 mean the ack is moot; stop retrying but keep the local state.
   return r.ok || r.status === 404 || r.status === 409;
 }
-async function flushAcks() {
+async function flushAcks(token) {
+  if (!token) return loadAcks().length;
   const list = loadAcks();
   if (!list.length) return 0;
   const remaining = [];
   for (const a of list) {
     try {
-      const done = await postAck(a.kind, a.id, a.by);
+      const done = await postAck(a.kind, a.id, a.by, token);
       if (!done) remaining.push(a);
     } catch {
       remaining.push(a);
@@ -488,30 +494,44 @@ function LocationMap({ isDanger }) {
   const markerRef = useRef(null);
   const [coords, setCoords] = useState(null);
   const [error, setError] = useState(null);
+  const [requestCount, setRequestCount] = useState(0);
+  const [clock, setClock] = useState(Date.now());
 
   useEffect(() => {
+    if (!requestCount) return undefined;
+    if (!window.isSecureContext) {
+      setError("Browser location requires HTTPS or localhost");
+      return undefined;
+    }
     if (!navigator.geolocation) {
       setError("Geolocation not supported");
-      return;
+      return undefined;
     }
-    const watchId = navigator.geolocation.watchPosition(
+    navigator.geolocation.getCurrentPosition(
       (pos) => {
         setCoords({
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
+          ts: Date.now() / 1000,
         });
         setError(null);
       },
       (err) => setError(err.message),
-      { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 }
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
     );
-    return () => navigator.geolocation.clearWatch(watchId);
+    return undefined;
+  }, [requestCount]);
+
+  useEffect(() => {
+    const id = setInterval(() => setClock(Date.now()), 30000);
+    return () => clearInterval(id);
   }, []);
 
   useEffect(() => {
     if (!mapRef.current || !window.L || mapInstance.current) return;
     const L = window.L;
-    const initial = coords || { lat: 12.9716, lng: 77.5946 };
+    if (!coords) return;
+    const initial = coords;
     const map = L.map(mapRef.current, {
       center: [initial.lat, initial.lng],
       zoom: 16,
@@ -538,7 +558,7 @@ function LocationMap({ isDanger }) {
     }).addTo(map);
     mapInstance.current = map;
     setTimeout(() => map.invalidateSize(), 200);
-  }, []);
+  }, [coords]);
 
   useEffect(() => {
     if (!coords || !mapInstance.current || !window.L) return;
@@ -589,8 +609,9 @@ function LocationMap({ isDanger }) {
             fontFamily: "IBM Plex Sans, system-ui, sans-serif",
           }}
         >
-          Patient Location
+          Caretaker Device Location
         </span>
+        <button type="button" onClick={() => { setError(null); setRequestCount((count) => count + 1); }} style={{ marginLeft: "auto", border: 0, borderRadius: 8, padding: "7px 10px", background: "#336aea", color: "#fff", cursor: "pointer" }}>Request location</button>
         {coords && (
           <span
             style={{
@@ -616,6 +637,9 @@ function LocationMap({ isDanger }) {
           </span>
         )}
       </div>
+      <p style={{ padding: "0 18px", color: "#64748b", fontSize: 12 }}>This is the caretaker browser device only. Bathroom/incident location is unavailable because no installation coordinates or device GPS telemetry are configured.</p>
+      {coords && clock / 1000 - coords.ts > 300 && <p style={{ padding: "0 18px", color: "#b45309", fontSize: 12 }}>Caretaker device coordinates are stale. Request location to refresh.</p>}
+      {coords && clock / 1000 - coords.ts <= 300 && <p style={{ padding: "0 18px", fontSize: 12 }}><a href={`https://maps.google.com/?q=${coords.lat},${coords.lng}`} target="_blank" rel="noreferrer">Open caretaker device location in map</a> · not the patient location</p>}
       <div
         ref={mapRef}
         style={{
@@ -738,7 +762,7 @@ function AlertCard({ alert, onAck }) {
 /* Emergency event card — the durable, offline-first record (emergency_events).
  * Distinct from transient alerts: acknowledging marks the *notification*
  * handled, not that the physical emergency ended. */
-function EmergencyCard({ event, onAck }) {
+function EmergencyCard({ event, onAck, onResolve }) {
   const sev = event.severity || "watch";
   const color = sev === "high" || sev === "critical" ? "#dc2626"
     : sev === "watch" ? "#f59e0b" : "#0ea5e9";
@@ -766,6 +790,10 @@ function EmergencyCard({ event, onAck }) {
         {event.message}
         {event.score != null && ` · risk ${Math.round(event.score)}`}
       </div>
+      {event.evidence && <details style={{ margin: "8px 0", fontSize: 12, color: "#475569" }}><summary>Detection evidence</summary><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{JSON.stringify(event.evidence, null, 2)}</pre></details>}
+      {event.state === "resolved" ? (
+        <div style={{ fontSize: 11, color: "#64748b" }}>Resolved by {event.resolved_by || "caretaker"} {event.resolved_at ? timeAgo(event.resolved_at) : ""}</div>
+      ) : <>
       {acknowledged ? (
         <div style={{ fontSize: 11, color: "#64748b" }}>
           ✓ Notification acknowledged by {event.ack_by || "caretaker"}{" "}
@@ -780,6 +808,8 @@ function EmergencyCard({ event, onAck }) {
           Acknowledge Emergency
         </button>
       )}
+      {acknowledged && <button onClick={() => onResolve(event.event_id)} style={{ marginTop: 10, background: "#166534", color: "#fff", border: 0, borderRadius: 10, padding: "10px 20px", fontWeight: 700, cursor: "pointer", width: "100%" }}>Resolve incident</button>}
+      </>}
     </div>
   );
 }
@@ -788,12 +818,16 @@ function EmergencyCard({ event, onAck }) {
 /*  Main App                                                           */
 /* ------------------------------------------------------------------ */
 export default function CaretakerApp() {
+  const [caretakerToken, setCaretakerToken] = useState("");
   const [status, setStatus] = useState(null);
   const [alerts, setAlerts] = useState([]);
   const [voiceMessages, setVoiceMessages] = useState([]);
   const [emergencies, setEmergencies] = useState([]);
   const [connected, setConnected] = useState(false);
   const [apiError, setApiError] = useState(null);
+  const [actionError, setActionError] = useState("");
+  const [dataError, setDataError] = useState("");
+  const [lastDataUpdate, setLastDataUpdate] = useState(0);
   const [lastAlertId, setLastAlertId] = useState(0);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [notificationRequested, setNotificationRequested] = useState(false);
@@ -818,10 +852,10 @@ export default function CaretakerApp() {
   // replay any acknowledgements queued while offline
   const syncAcks = useCallback(async () => {
     try {
-      const remaining = await flushAcks();
+      const remaining = await flushAcks(caretakerToken);
       setPendingAcks(remaining);
     } catch {}
-  }, []);
+  }, [caretakerToken]);
   useEffect(() => {
     syncAcks();
     const id = setInterval(syncAcks, 15000);
@@ -895,32 +929,28 @@ export default function CaretakerApp() {
   // fetch alert list + emergency events (the offline-first source of truth)
   const fetchData = useCallback(async () => {
     try {
-      const r = await fetch(`${API_BASE}/alerts?limit=30`);
-      if (r.ok) {
-        const d = await r.json();
-        setAlerts(d.alerts || []);
-      }
-    } catch {}
-    try {
-      const r = await fetch(`${API_BASE}/emergencies?limit=20`);
-      if (r.ok) {
-        const d = await r.json();
-        setEmergencies(d.emergencies || []);
-      }
-    } catch {}
-    try {
-      const r = await fetch(`${API_BASE}/voice-messages?limit=60`);
-      if (r.ok) {
-        const d = await r.json();
-        setVoiceMessages(d.messages || []);
-      }
-    } catch {}
+      const responses = await Promise.all([
+        fetch(`${API_BASE}/alerts?limit=30`),
+        fetch(`${API_BASE}/emergencies?limit=20`),
+        fetch(`${API_BASE}/voice-messages?limit=60`),
+      ]);
+      if (responses.some((r) => !r.ok)) throw new Error(`Caretaker data request failed (HTTP ${responses.find((r) => !r.ok).status}).`);
+      const [a, e, v] = await Promise.all(responses.map((r) => r.json()));
+      if (!Array.isArray(a.alerts) || !Array.isArray(e.emergencies) || !Array.isArray(v.messages)) throw new Error("Caretaker API returned an invalid response shape.");
+      setAlerts(a.alerts);
+      setEmergencies(e.emergencies);
+      setVoiceMessages(v.messages);
+      setLastDataUpdate(Date.now() / 1000);
+      setDataError("");
+    } catch (err) { setDataError(err.message || "Could not load caretaker records."); }
   }, []);
 
   useEffect(() => {
-    fetchData();
-    const id = setInterval(fetchData, POLL_MS);
-    return () => clearInterval(id);
+    let active = true;
+    let timer;
+    const poll = async () => { await fetchData(); if (active) timer = setTimeout(poll, POLL_MS); };
+    void poll();
+    return () => { active = false; clearTimeout(timer); };
   }, [fetchData]);
 
   // SSE stream for instant push
@@ -970,6 +1000,7 @@ export default function CaretakerApp() {
   /* Acknowledge locally first, then try the server. If the edge server is
    * unreachable the ack is queued and replayed later (offline-first). */
   const handleAck = useCallback(async (id) => {
+    if (!caretakerToken) { setActionError("Enter the caretaker action token before acknowledging alerts."); return; }
     setAlerts((prev) =>
       prev.map((a) =>
         a.id === id
@@ -979,14 +1010,17 @@ export default function CaretakerApp() {
       )
     );
     try {
-      const done = await postAck("alert", id, "caretaker");
+      const done = await postAck("alert", id, "caretaker", caretakerToken);
+      setActionError("");
       if (!done) setPendingAcks(queueAck("alert", id, "caretaker"));
-    } catch {
+    } catch (err) {
+      if (err.authorizationFailure) { setActionError(err.message); await fetchData(); return; }
       setPendingAcks(queueAck("alert", id, "caretaker"));
     }
-  }, []);
+  }, [caretakerToken, fetchData]);
 
   const handleEmergencyAck = useCallback(async (eventId) => {
+    if (!caretakerToken) { setActionError("Enter the caretaker action token before acknowledging emergencies."); return; }
     setEmergencies((prev) =>
       prev.map((e) =>
         e.event_id === eventId
@@ -996,12 +1030,26 @@ export default function CaretakerApp() {
       )
     );
     try {
-      const done = await postAck("emergency", eventId, "caretaker");
+      const done = await postAck("emergency", eventId, "caretaker", caretakerToken);
+      setActionError("");
       if (!done) setPendingAcks(queueAck("emergency", eventId, "caretaker"));
-    } catch {
+    } catch (err) {
+      if (err.authorizationFailure) { setActionError(err.message); await fetchData(); return; }
       setPendingAcks(queueAck("emergency", eventId, "caretaker"));
     }
-  }, []);
+  }, [caretakerToken, fetchData]);
+
+  const handleEmergencyResolve = useCallback(async (eventId) => {
+    try {
+      const response = await fetch(`${API_BASE}/emergencies/${encodeURIComponent(eventId)}/resolve`, {
+        method: "POST", headers: { Authorization: `Bearer ${caretakerToken}` },
+      });
+      if (!response.ok) throw new Error(response.status === 503 ? "Set SAFEBATH_CARETAKER_TOKEN on the server to enable actions." : `Resolve failed (HTTP ${response.status}).`);
+      await response.json();
+      setActionError("");
+      setEmergencies((items) => items.map((item) => item.event_id === eventId ? { ...item, state: "resolved", resolved_by: "caretaker", resolved_at: Date.now() / 1000 } : item));
+    } catch (err) { setActionError(err.message || "Could not resolve incident."); }
+  }, [caretakerToken]);
 
   const togglePush = useCallback(async () => {
     if (pushState === "subscribed") {
@@ -1019,6 +1067,7 @@ export default function CaretakerApp() {
   const activeEmergencies = emergencies.filter(
     (e) => e.state !== "resolved" && e.state !== "acknowledged"
   );
+  const recentEmergencies = emergencies.filter((e) => e.state === "resolved" || e.state === "acknowledged");
 
   return (
     <div
@@ -1076,6 +1125,7 @@ export default function CaretakerApp() {
             gap: 10,
           }}
         >
+          <input aria-label="Caretaker action token" type="password" autoComplete="off" placeholder="Caretaker action token" value={caretakerToken} onChange={(event) => { setCaretakerToken(event.target.value); setActionError(""); }} style={{ width: 150, borderRadius: 8, border: "1px solid rgba(255,255,255,.35)", padding: "7px 9px", background: "rgba(255,255,255,.12)", color: "#fff" }} />
           <button
             onClick={togglePush}
             disabled={["unsupported", "denied", "not-configured"].includes(pushState)}
@@ -1144,6 +1194,8 @@ export default function CaretakerApp() {
 
       {/* Content container */}
       <div style={{ padding: "20px 16px", maxWidth: 480, margin: "0 auto" }}>
+        {actionError && <div role="alert" style={{ background: "#fef2f2", color: "#991b1b", padding: 10, borderRadius: 10, marginBottom: 12, fontSize: 12 }}>{actionError}</div>}
+        {(dataError || lastDataUpdate) && <div role={dataError ? "alert" : "status"} style={{ background: dataError ? "#fef2f2" : "#eff6ff", color: dataError ? "#991b1b" : "#475569", padding: 10, borderRadius: 10, marginBottom: 12, fontSize: 12 }}>{dataError ? `Caretaker records unavailable: ${dataError}` : `Records updated ${timeAgo(lastDataUpdate)}.`}</div>}
         {pendingAcks > 0 && (
           <div
             style={{
@@ -1304,6 +1356,12 @@ export default function CaretakerApp() {
           <SOSButton isDanger={isDanger} />
         </div>
 
+        {status?.devices && <section style={{ background: "#fff", borderRadius: 16, padding: 16, marginBottom: 20, boxShadow: "0 4px 24px rgba(0,0,0,0.06)" }}>
+          <h2 style={{ margin: "0 0 10px", fontSize: 15, color: "#1a3760" }}>Sensor health</h2>
+          {!status.devices.length ? <p style={{ margin: 0, color: "#64748b", fontSize: 12 }}>Device registry is unavailable.</p> : status.devices.map((device) => <div key={device.device_id} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "5px 0", fontSize: 12, color: "#475569" }}><span>{device.name || device.device_id} ({device.device_id})</span><span style={{ color: device.status === "online" ? "#15803d" : "#b91c1c", fontWeight: 700 }}>{device.status}{device.age_seconds != null ? ` · ${device.age_seconds}s` : " · no telemetry"}</span></div>)}
+          {status.last_risk_update > 0 && Date.now() / 1000 - status.last_risk_update > 90 && <p style={{ margin: "8px 0 0", color: "#b45309", fontSize: 12 }}>Risk snapshot is stale ({timeAgo(status.last_risk_update)}). Missing telemetry is not evidence that the patient is safe.</p>}
+        </section>}
+
         {/* Location Map */}
         <LocationMap isDanger={isDanger} />
 
@@ -1342,10 +1400,15 @@ export default function CaretakerApp() {
               Active Emergencies ({activeEmergencies.length})
             </div>
             {activeEmergencies.map((e) => (
-              <EmergencyCard key={e.event_id} event={e} onAck={handleEmergencyAck} />
+              <EmergencyCard key={e.event_id} event={e} onAck={handleEmergencyAck} onResolve={handleEmergencyResolve} />
             ))}
           </div>
         )}
+
+        {recentEmergencies.length > 0 && <section style={{ marginBottom: 20 }}>
+          <h2 style={{ fontSize: 14, color: "#64748b", textTransform: "uppercase" }}>Recent incidents</h2>
+          {recentEmergencies.map((e) => <EmergencyCard key={e.event_id} event={e} onAck={handleEmergencyAck} onResolve={handleEmergencyResolve} />)}
+        </section>}
 
         {/* Active alerts */}
         {activeAlerts.length > 0 && (
@@ -1386,7 +1449,7 @@ export default function CaretakerApp() {
           >
             Alert History
           </div>
-          {alerts.length === 0 ? (
+          {dataError ? <div style={{ color: "#b91c1c", padding: 20 }}>Alert history is unavailable until the API connection recovers.</div> : alerts.length === 0 ? (
             <div
               style={{
                 background: "#fff",

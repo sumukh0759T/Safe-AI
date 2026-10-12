@@ -135,6 +135,7 @@ function makeEmptyLiveSnapshot() {
     band: "normal",
     alert_state: "resolved",
     risk_history: [],
+    radarDevice: null,
   };
 }
 
@@ -162,6 +163,18 @@ function makeMockSnapshot() {
       motion: !collapse && Math.random() > 0.25,
       stillness_ms: collapse ? Math.round((t % 20) * 1000) : 0,
       possible_collapse: collapse,
+      _ts: t,
+    },
+    radarDevice: {
+      device_id: "radar-01",
+      module: "radar",
+      name: "Presence Radar",
+      status: "online",
+      last_seen: t,
+      age_seconds: 0,
+      sensor_status: "ok",
+      simulated: true,
+      registered: true,
     },
     toilet: {
       gas_ppm: 55 + Math.random() * 15,
@@ -304,124 +317,30 @@ function MatCard({ frameValues, recentFrames, headerExtra }) {
   );
 }
 
-/* Board 2: radar scope — sweep + presence blip + stillness ring toward 120s.
-   The C4001 exposes booleans only (no spatial returns), so this is a status
-   scope, not a map: blip = presence, green/fast = motion, ring = stillness. */
-function RadarCard({ radar }) {
-  const canvasRef = useRef(null);
-  const stateRef = useRef(radar);
-  stateRef.current = radar;
+/*
+ * C4001 Radar Monitor — top-down sector visualization + data cards.
+ *
+ * The previous 360° sweep scope was physically misleading: the DFRobot C4001 is a
+ * presence/motion mmWave sensor with a 100° horizontal field of view, not an
+ * omnidirectional scanner. This replaced the 360° disc with a top-down plan-view
+ * sector whose total horizontal angle is exactly 100° (-50° .. +50° relative to
+ * the forward axis, which by default points toward the pressure mat).
+ *
+ * What the current firmware/telemetry contract actually provides (schemas.py
+ * RadarStatusPayload): presence, motion, stillness_ms, possible_collapse.
+ *
+ * What it does NOT provide (shown as "Not provided", never fabricated):
+ *   distance_m, target_count, signal/confidence, point cloud, target coords.
+ *
+ * The drawing shows the specified beam angle as a nominal FOV — not a guaranteed
+ * detection boundary. No live targets, no sweep animation, no fabricated distances
+ * are drawn. The vertical FOV (80° or 40°) is reported as a separate nominal spec
+ * and is never drawn as horizontal coverage.
+ */
+import { RadarCard as RadarCardImpl } from "./radarCard.mjs";
+import { radarModelConfirmed } from "./radarFieldsOfView.mjs";
 
-  useEffect(() => {
-    let raf;
-    const draw = () => {
-      const cv = canvasRef.current;
-      if (cv) {
-        const ctx = cv.getContext("2d");
-        const W = cv.width, H = cv.height;
-        const cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 8;
-        const st = stateRef.current || {};
-        const t = performance.now() / 1000;
-
-        ctx.clearRect(0, 0, W, H);
-
-        /* disc + graticule */
-        ctx.fillStyle = "#0b1220";
-        ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill();
-        ctx.strokeStyle = "#1e293b"; ctx.lineWidth = 1;
-        for (const f of [1 / 3, 2 / 3, 1]) {
-          ctx.beginPath(); ctx.arc(cx, cy, R * f, 0, Math.PI * 2); ctx.stroke();
-        }
-        ctx.beginPath();
-        ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy);
-        ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R);
-        ctx.stroke();
-
-        /* rotating sweep with fading tail */
-        const ang = (t * 1.4) % (Math.PI * 2);
-        for (let i = 0; i < 26; i++) {
-          const a = ang - i * 0.035;
-          ctx.strokeStyle = `rgba(56,189,248,${0.4 * (1 - i / 26)})`;
-          ctx.lineWidth = 2;
-          ctx.beginPath(); ctx.moveTo(cx, cy);
-          ctx.lineTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R);
-          ctx.stroke();
-        }
-
-        /* stillness progress ring — fills toward the 120 s collapse rule */
-        const frac = clamp((Number(st.stillness_ms) || 0) / 120000, 0, 1);
-        if (frac > 0) {
-          ctx.lineWidth = 5;
-          ctx.strokeStyle = frac > 0.8 ? "#ef4444" : "#f59e0b";
-          ctx.beginPath();
-          ctx.arc(cx, cy, R - 3, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
-          ctx.stroke();
-        }
-
-        /* presence blip — lights up as the sweep passes; drifts slowly */
-        if (st.presence && !st.possible_collapse) {
-          const blipA = -Math.PI / 3 + Math.sin(t * 0.11) * 0.9;
-          const rel = (((ang - blipA) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
-          if (rel < 1.4) {
-            const rr = st.motion ? R * 0.72 : R * 0.42;
-            const alpha = 1 - rel / 1.4;
-            ctx.fillStyle = st.motion
-              ? `rgba(34,197,94,${alpha})`
-              : `rgba(250,204,21,${alpha})`;
-            ctx.beginPath();
-            ctx.arc(cx + Math.cos(blipA) * rr, cy + Math.sin(blipA) * rr,
-              st.motion ? 6 : 4, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        }
-
-        /* sensor dot */
-        ctx.fillStyle = "#38bdf8";
-        ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.fill();
-
-        /* collapse pulse overlay */
-        if (st.possible_collapse) {
-          const p = (Math.sin(t * 5) + 1) / 2;
-          ctx.fillStyle = `rgba(239,68,68,${0.10 + 0.20 * p})`;
-          ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill();
-          ctx.fillStyle = "#fecaca";
-          ctx.font = "bold 11px monospace"; ctx.textAlign = "center";
-          ctx.fillText("POSSIBLE COLLAPSE", cx, cy + R - 14);
-        }
-      }
-      raf = requestAnimationFrame(draw);
-    };
-    raf = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(raf);
-  }, []);
-
-  return (
-    <Card title="Board 2 — Radar C4001" subtitle="presence / motion / stillness rule (>120s)"
-      danger={!!radar?.possible_collapse}>
-      <canvas ref={canvasRef} width={260} height={170}
-        style={{ width: "100%", borderRadius: 8, background: "#0b1220" }} />
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "10px 0" }}>
-        <Pill on={!!radar?.presence} labelOn="PRESENCE" labelOff="empty" />
-        <Pill on={!!radar?.motion} labelOn="MOVING" labelOff="still" />
-        <Pill on={!!radar?.possible_collapse} labelOn="⚠ COLLAPSE" labelOff="no flag" />
-      </div>
-      <Bar label="stillness → 120 s trigger" value={radar?.stillness_ms ?? 0} max={180000} unit=" ms" />
-    </Card>
-  );
-}
-
-function Bar({ label, value, max, unit }) {
-  return (
-    <div style={{ marginBottom: 8 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#cbd5e1" }}>
-        <span>{label}</span><span>{fmt(value, 1)}{unit}</span>
-      </div>
-      <div style={{ height: 6, background: "#1e293b", borderRadius: 4 }}>
-        <div style={{ width: `${clamp((value / max) * 100, 0, 100)}%`, height: 6, borderRadius: 4, background: "#38bdf8" }} />
-      </div>
-    </div>
-  );
-}
+const RadarCard = RadarCardImpl;
 
 const Pill = ({ on, labelOn, labelOff }) => (
   <span style={{
@@ -432,6 +351,19 @@ const Pill = ({ on, labelOn, labelOff }) => (
     {on ? labelOn : labelOff}
   </span>
 );
+
+function Bar({ label, value, max, unit }) {
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#cbd5e1" }}>
+        <span>{label}</span><span>{fmt(value, 1)}{unit}</span>
+      </div>
+      <div style={{ height: 6, background: "#1e293b", borderRadius: 4 }}>
+        <div style={{ width: `${clamp(((value || 0) / max) * 100, 0, 100)}%`, height: 6, borderRadius: 4, background: "#38bdf8" }} />
+      </div>
+    </div>
+  );
+}
 
 /* --------------------------- system truth -------------------------------- */
 
@@ -543,6 +475,7 @@ function SafeBathAppInner() {
   const [log, setLog] = useState([]);
   const [history, setHistory] = useState([]);
   const [matView, setMatView] = useState("auto");   // "auto" | "grid" | "four_zone"
+  const [radarConfig, setRadarConfig] = useState(() => loadRadarConfig());
 
   /* Live polling */
   useEffect(() => {
@@ -604,6 +537,14 @@ function SafeBathAppInner() {
   }, [mode, snap, matValues]);
 
   const radar = mode === "live" ? parseJsonSafe(snap.modules?.radar?.value) : snap.radar;
+  const radarDevice = Array.isArray(snap.devices)
+    ? snap.devices.find((d) => d.device_id === "radar-01" || d.module === "radar")
+    : null;
+  const updateRadarConfig = (updates) => setRadarConfig((current) => {
+    const next = { ...current, ...updates };
+    try { window.localStorage.setItem("safebath.radar.config", JSON.stringify(next)); } catch {}
+    return next;
+  });
   const toilet = mode === "live" ? parseJsonSafe(snap.modules?.toilet?.value) : snap.toilet;
   const audio = mode === "live" ? parseJsonSafe(snap.modules?.audio?.value) : snap.audio;
   const tof = mode === "live" ? parseJsonSafe(snap.modules?.tof?.value) : snap.tof;
@@ -623,6 +564,39 @@ function SafeBathAppInner() {
     ? (liveError || "api-unreachable") : null;
   const matLoading = mode === "live" && !snap.mat_zones && !matError;
   const matToggle = <MatViewToggle value={matView} onChange={setMatView} />;
+
+  /* Radar setup is operator configuration saved in this browser. It is not
+   * hardware-reported or physically verified. */
+  function loadRadarConfig() {
+    try {
+      const raw = typeof window !== "undefined"
+        ? JSON.parse(window.localStorage.getItem("safebath.radar.config") || "null")
+        : null;
+      if (!raw || typeof raw !== "object") return defaultRadarConfig();
+      const model = typeof raw.model === "string" ? raw.model.trim() : "";
+      const y = raw.mountingYaw;
+      const tilt = raw.downwardTiltDeg;
+      const dist = raw.intendedDistance;
+      return {
+        model: model || "",
+        modelConfirmed: radarModelConfirmed(model),
+        mountingYaw: y != null && Number.isFinite(y) && y >= -180 && y <= 180 ? y : null,
+        downwardTiltDeg: tilt != null && Number.isFinite(tilt) && tilt >= 0 && tilt <= 90 ? tilt : null,
+        intendedDistance: dist != null && Number.isFinite(dist) && dist >= 0.1 && dist <= 100 ? dist : null,
+      };
+    } catch {
+      return defaultRadarConfig();
+    }
+  }
+  function defaultRadarConfig() {
+    return {
+      model: "",
+      modelConfirmed: false,
+      mountingYaw: null,
+      downwardTiltDeg: null,
+      intendedDistance: null,
+    };
+  }
 
   const bandColor = snap.band === "high" ? "#ef4444" : snap.band === "watch" ? "#f59e0b" : "#22c55e";
 
@@ -725,7 +699,16 @@ function SafeBathAppInner() {
             headerExtra={matToggle} />
         )}
 
-        <RadarCard radar={radar} />
+        <RadarCard
+          radar={radar}
+          radarDevice={radarDevice}
+          radarConfig={radarConfig}
+          onRadarConfigChange={updateRadarConfig}
+          matZones={snap.mat_zones}
+          matDevice={matDevice}
+          simulated={mode === "mock" || snap.source === "simulated" || !!radarDevice?.simulated}
+          now={mode === "live" ? Date.now() / 1000 : undefined}
+        />
 
         <Card title="Board 3 — Toilet Biomarkers" subtitle="MQ-135 · MQ-3 · TCS3200 → Random Forest" danger={false}>
           <Bar label="gas (MQ-135)" value={toilet?.gas_ppm ?? 0} max={200} unit=" ppm" />
