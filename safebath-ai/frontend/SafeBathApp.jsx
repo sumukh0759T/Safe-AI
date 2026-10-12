@@ -578,8 +578,8 @@ function SafeBathAppInner() {
       const tilt = raw.downwardTiltDeg;
       const dist = raw.intendedDistance;
       return {
-        model: model || "",
-        modelConfirmed: radarModelConfirmed(model),
+        model: model || "SEN0609",
+        modelConfirmed: radarModelConfirmed(model || "SEN0609"),
         mountingYaw: y != null && Number.isFinite(y) && y >= -180 && y <= 180 ? y : null,
         downwardTiltDeg: tilt != null && Number.isFinite(tilt) && tilt >= 0 && tilt <= 90 ? tilt : null,
         intendedDistance: dist != null && Number.isFinite(dist) && dist >= 0.1 && dist <= 100 ? dist : null,
@@ -590,8 +590,8 @@ function SafeBathAppInner() {
   }
   function defaultRadarConfig() {
     return {
-      model: "",
-      modelConfirmed: false,
+      model: "SEN0609",
+      modelConfirmed: true,
       mountingYaw: null,
       downwardTiltDeg: null,
       intendedDistance: null,

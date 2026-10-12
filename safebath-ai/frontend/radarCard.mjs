@@ -684,8 +684,8 @@ export function radarConfigFromEnv() {
     const tilt = raw.downwardTiltDeg;
     const dist = raw.intendedDistance;
     return {
-      model,
-      modelConfirmed: radarModelConfirmed(model),
+      model: model || "SEN0609",
+      modelConfirmed: radarModelConfirmed(model || "SEN0609"),
       mountingYaw:
         y != null && Number.isFinite(y) && y >= -180 && y <= 180 ? y : null,
       downwardTiltDeg:
@@ -704,8 +704,8 @@ export function radarConfigFromEnv() {
 
 export function defaultRadarConfig() {
   return {
-    model: "",
-    modelConfirmed: false,
+    model: "SEN0609",
+    modelConfirmed: true,
     mountingYaw: null,
     downwardTiltDeg: null,
     intendedDistance: null,
