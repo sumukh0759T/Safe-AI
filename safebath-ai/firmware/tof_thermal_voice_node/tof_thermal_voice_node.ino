@@ -36,9 +36,9 @@
 #endif
 
 const char* device_id = "tof-01";           // must match SAFEBATH_DEVICES
-const char* ssid = "YOUR_ROUTER_SSID";
-const char* password = "YOUR_ROUTER_PASSWORD";
-const char* server_host = "192.168.1.50";   // RPi IP running the edge API
+const char* ssid = "OnePlus 5";
+const char* password = "Yatslove";
+const char* server_host = "192.168.43.66";   // RPi IP running the edge API
 const uint16_t server_port = 8000;
 const char* node_token = SAFEBATH_NODE_TOKEN;  // local-only token; matches Pi device config
 
