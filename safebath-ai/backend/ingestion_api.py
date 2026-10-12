@@ -51,11 +51,12 @@ Behavior:
 import json
 import hmac
 import os
+import re
 import time
 import uuid
 from typing import Any, Dict, Literal, Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field, ValidationError
 
@@ -95,6 +96,15 @@ CONTRACT_VERSION = 1
 VOICE_REQUEST_TTL = 30.0        # how long a request stays claimable/relevant
 VOICE_REQUEST_MAX_AGE = 120.0   # ignore stale requests from long ago
 VOICE_CLAIM_LEASE = 8.0         # Board 4's listen window (firmware matches)
+VOICE_PLAYBACK_TTL = 45.0       # manual command expires if the speaker never claims it
+VOICE_PROMPTS = {
+    1: "are_you_ok",
+    2: "help",
+    3: "emergency_procedure",
+    4: "safety_check",
+}
+VOICE_EVENT_ID = re.compile(r"^vr-[0-9a-f]{16}$")
+VOICE_PLAYBACK_STATES = ("received", "started", "completed", "failed")
 
 def create_voice_request(db_path: str, ts: float, prompt: str) -> str:
     """Board 5 posted a voice prompt event — record a claimable request for
@@ -133,17 +143,21 @@ def claim_voice_request(db_path: str, device_id: str,
         if role == "play":
             row = conn.execute(
                 "SELECT id, event_id, ts, prompt FROM voice_requests "
-                "WHERE played_by IS NULL AND ts > ? "
-                "ORDER BY ts ASC LIMIT 1",
-                (now - VOICE_REQUEST_MAX_AGE,)).fetchone()
+                "WHERE played_by IS NULL AND ts > ? AND expires_at > ? "
+                "AND (target_device_id IS NULL OR target_device_id=?) "
+                "ORDER BY CASE WHEN source='manual' THEN 0 ELSE 1 END, ts ASC LIMIT 1",
+                (now - VOICE_REQUEST_MAX_AGE, now, device_id)).fetchone()
             if not row:
                 return None
             conn.execute(
-                "UPDATE voice_requests SET played_by=?, played_at=? WHERE id=?",
-                (device_id, now, row["id"]))
+                "UPDATE voice_requests SET played_by=?, played_at=?, "
+                "playback_status='claimed', playback_updated_at=? WHERE id=? "
+                "AND played_by IS NULL",
+                (device_id, now, now, row["id"]))
             conn.commit()
             return {"event_id": row["event_id"], "prompt": row["prompt"],
-                    "lease_seconds": lease, "role": "play"}
+                    "lease_seconds": lease, "role": "play",
+                    "playback_status": "claimed"}
 
         row = conn.execute(
             "SELECT id, event_id, ts, prompt FROM voice_requests "
@@ -160,6 +174,74 @@ def claim_voice_request(db_path: str, device_id: str,
         conn.commit()
         return {"event_id": row["event_id"], "prompt": row["prompt"],
                 "lease_seconds": lease, "role": "listen"}
+    finally:
+        conn.close()
+
+
+def queue_manual_voice_command(db_path: str, device_id: str,
+                               prompt: str, now: Optional[float] = None) -> dict:
+    """Create one allowlisted remote speaker command for the registered ToF node."""
+    now = now if now is not None else time.time()
+    conn = get_conn(db_path)
+    try:
+        event_id = f"vr-{uuid.uuid4().hex[:16]}"
+        conn.execute(
+            "INSERT INTO voice_requests(event_id,ts,prompt,expires_at,source,"
+            "target_device_id,playback_status,playback_updated_at) "
+            "VALUES (?,?,?,?, 'manual', ?, 'queued', ?)",
+            (event_id, now, prompt, now + VOICE_PLAYBACK_TTL,
+             device_id, now),
+        )
+        conn.commit()
+        return {"event_id": event_id, "device_id": device_id, "prompt": prompt,
+                "status": "queued", "created_at": now,
+                "expires_at": now + VOICE_PLAYBACK_TTL}
+    finally:
+        conn.close()
+
+
+def voice_command_status(db_path: str, event_id: str) -> Optional[dict]:
+    conn = get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT event_id,ts,prompt,source,target_device_id,played_by,played_at,"
+            "playback_status,playback_error,playback_updated_at,expires_at "
+            "FROM voice_requests WHERE event_id=?", (event_id,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def set_voice_playback_status(db_path: str, event_id: str, device_id: str,
+                              status: str, error: Optional[str] = None,
+                              now: Optional[float] = None) -> Optional[dict]:
+    """Apply monotonic, idempotent playback acknowledgement from the speaker."""
+    if status not in VOICE_PLAYBACK_STATES:
+        return None
+    now = now if now is not None else time.time()
+    rank = {"queued": 0, "claimed": 1, "received": 2, "started": 3,
+            "completed": 4, "failed": 4}
+    conn = get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT played_by,playback_status FROM voice_requests WHERE event_id=?",
+            (event_id,),
+        ).fetchone()
+        if not row or row["played_by"] != device_id:
+            return None
+        current = row["playback_status"] or "claimed"
+        if status not in (current, "failed") and rank[status] < rank.get(current, 0):
+            return {"event_id": event_id, "status": current, "unchanged": True}
+        if current in ("completed", "failed") and status != current:
+            return {"event_id": event_id, "status": current, "unchanged": True}
+        conn.execute(
+            "UPDATE voice_requests SET playback_status=?,playback_error=?,"
+            "playback_updated_at=? WHERE event_id=?",
+            (status, error[:120] if error else None, now, event_id),
+        )
+        conn.commit()
+        return {"event_id": event_id, "status": status, "unchanged": False}
     finally:
         conn.close()
 
@@ -428,6 +510,107 @@ async def _ingest(request: Request, expected: str) -> JSONResponse:
 api_v1_router = APIRouter()
 
 
+class ManualVoiceCommand(StrictModel):
+    prompt_id: int = Field(strict=True, ge=1, le=4)
+    device_id: str = Field(default="tof-01", min_length=1, max_length=48,
+                           pattern=r"^[A-Za-z0-9_.-]+$")
+
+
+class VoicePlaybackAck(StrictModel):
+    event_id: str = Field(min_length=1, max_length=40,
+                          pattern=r"^vr-[0-9a-f]{16}$")
+    device_id: str = Field(min_length=1, max_length=48,
+                           pattern=r"^[A-Za-z0-9_.-]+$")
+    status: Literal["received", "started", "completed", "failed"]
+    error: Optional[str] = Field(default=None, max_length=120)
+
+
+def _authorize_voice_dashboard(request: Request) -> None:
+    expected = os.getenv("SAFEBATH_VOICE_TEST_TOKEN", "")
+    supplied = request.headers.get("Authorization", "")
+    if (not expected or not supplied.startswith("Bearer ") or
+            not hmac.compare_digest(supplied[7:], expected)):
+        raise HTTPException(status_code=401, detail="voice test is not configured or token is invalid")
+
+
+def _authorize_tof_node(request: Request, device_id: str):
+    device = device_manager.get(device_id)
+    if device is None or not device.enabled or device.module != "tof":
+        raise HTTPException(status_code=403, detail="unknown_or_disabled_tof_device")
+    if device.token:
+        supplied = request.headers.get("X-Node-Token", "")
+        if not hmac.compare_digest(supplied, str(device.token)):
+            raise HTTPException(status_code=403, detail="invalid_token")
+    return device
+
+
+@api_v1_router.post("/api/v1/voice/commands", status_code=202)
+async def create_manual_voice_command(body: ManualVoiceCommand,
+                                      request: Request) -> dict:
+    """Queue a dashboard speaker test; the browser cannot address arbitrary modules."""
+    _authorize_voice_dashboard(request)
+    _authorize_tof_node(request, body.device_id)
+    db_path = DB_PATH
+    init_telemetry(db_path)
+    prompt = VOICE_PROMPTS[body.prompt_id]
+    return queue_manual_voice_command(db_path, body.device_id, prompt)
+
+
+@api_v1_router.get("/api/v1/voice/commands/{event_id}")
+async def get_voice_command_status(event_id: str, request: Request) -> dict:
+    _authorize_voice_dashboard(request)
+    if not VOICE_EVENT_ID.fullmatch(event_id):
+        raise HTTPException(status_code=422, detail="invalid_event_id")
+    db_path = DB_PATH
+    init_telemetry(db_path)
+    command = voice_command_status(db_path, event_id)
+    if not command or command["source"] != "manual":
+        raise HTTPException(status_code=404, detail="voice_command_not_found")
+
+    now = time.time()
+    status = command["playback_status"] or "queued"
+    if status == "queued" and command["expires_at"] <= now:
+        status = "timed_out"
+    elif status == "claimed" and command["played_at"] and now - command["played_at"] > 15:
+        status = "timed_out"
+    elif status == "started" and command["playback_updated_at"] and now - command["playback_updated_at"] > 125:
+        status = "timed_out"
+
+    conn = get_conn(db_path)
+    try:
+        seen = conn.execute(
+            "SELECT last_seen FROM telemetry_devices WHERE device_id=?",
+            (command["target_device_id"],),
+        ).fetchone()
+        last_seen = seen["last_seen"] if seen else None
+    finally:
+        conn.close()
+    return {
+        "event_id": event_id,
+        "device_id": command["target_device_id"],
+        "prompt": command["prompt"],
+        "status": status,
+        "last_status": command["playback_status"],
+        "error": command["playback_error"],
+        "device_online": bool(last_seen is not None and now - last_seen <= 90),
+        "created_at": command["ts"],
+        "updated_at": command["playback_updated_at"],
+    }
+
+
+@api_v1_router.post("/api/v1/voice/ack")
+async def acknowledge_voice_playback(body: VoicePlaybackAck,
+                                     request: Request) -> dict:
+    """Record authenticated device receipt and DFPlayer playback lifecycle."""
+    _authorize_tof_node(request, body.device_id)
+    init_telemetry(DB_PATH)
+    result = set_voice_playback_status(
+        DB_PATH, body.event_id, body.device_id, body.status, body.error)
+    if result is None:
+        raise HTTPException(status_code=404, detail="voice_command_not_claimed_by_device")
+    return {"ok": True, **result}
+
+
 @api_v1_router.post("/api/v1/telemetry")
 async def ingest_telemetry(request: Request) -> JSONResponse:
     return await _ingest(request, "telemetry")
@@ -490,6 +673,8 @@ async def config() -> dict:
             "diagnostic": "/api/v1/diagnostic",
             "config": "/api/v1/config",
             "voice_pending": "/api/v1/voice/pending",
+            "voice_commands": "/api/v1/voice/commands",
+            "voice_ack": "/api/v1/voice/ack",
         },
     }
 

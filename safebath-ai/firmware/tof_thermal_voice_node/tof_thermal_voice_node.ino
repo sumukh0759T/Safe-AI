@@ -79,8 +79,25 @@ volatile unsigned long flowPulses = 0;
 void IRAM_ATTR flowISR() { flowPulses++; }
 
 bool TOF_READY = false;
+char serialCommand[16] = {};
+uint8_t serialCommandLength = 0;
+bool serialCommandOverflow = false;
+char activeRemoteEventId[40] = {};
+
+struct PendingVoiceAck {
+  char eventId[40] = {};
+  char status[12] = {};
+  char error[64] = {};
+  bool used = false;
+};
+PendingVoiceAck voiceAckQueue[8];
+uint8_t voiceAckHead = 0;
+uint8_t voiceAckCount = 0;
+uint32_t lastVoiceAckAttempt = 0;
 
 bool playVoicePrompt(uint16_t promptNumber);
+void pollSerialCommand();
+void pollVoiceAcks();
 
 /* -------------------- ToF boot sequence -------------------- */
 // All 3 sensors ship with the same default address (0x29). Bring them
@@ -186,6 +203,126 @@ bool playVoicePrompt(uint16_t promptNumber) {
   return true;
 }
 
+bool extractJsonString(const String& json, const char* key,
+                       char* output, size_t outputSize) {
+  const String marker = String("\"") + key + "\":\"";
+  const int start = json.indexOf(marker);
+  if (start < 0 || outputSize == 0) return false;
+  const int valueStart = start + marker.length();
+  const int valueEnd = json.indexOf('"', valueStart);
+  if (valueEnd <= valueStart ||
+      static_cast<size_t>(valueEnd - valueStart) >= outputSize) return false;
+  const size_t length = static_cast<size_t>(valueEnd - valueStart);
+  memcpy(output, json.c_str() + valueStart, length);
+  output[length] = '\0';
+  return true;
+}
+
+void queueVoiceAck(const char* eventId, const char* status,
+                   const char* error = "") {
+  if (!eventId || !eventId[0] || !status) return;
+  if (voiceAckCount >= sizeof(voiceAckQueue) / sizeof(voiceAckQueue[0])) {
+    Serial.println("[voice] acknowledgement queue full; status not queued");
+    return;
+  }
+  const uint8_t tail = static_cast<uint8_t>(
+      (voiceAckHead + voiceAckCount) % (sizeof(voiceAckQueue) / sizeof(voiceAckQueue[0])));
+  PendingVoiceAck& ack = voiceAckQueue[tail];
+  strlcpy(ack.eventId, eventId, sizeof(ack.eventId));
+  strlcpy(ack.status, status, sizeof(ack.status));
+  strlcpy(ack.error, error ? error : "", sizeof(ack.error));
+  ack.used = true;
+  ++voiceAckCount;
+}
+
+void pollVoiceAcks() {
+  if (voiceAckCount == 0 || !WiFi.isConnected()) return;
+  const uint32_t now = millis();
+  if (lastVoiceAckAttempt && static_cast<uint32_t>(now - lastVoiceAckAttempt) < 1000) return;
+  lastVoiceAckAttempt = now;
+
+  PendingVoiceAck& ack = voiceAckQueue[voiceAckHead];
+  char body[192];
+  snprintf(body, sizeof(body),
+           "{\"event_id\":\"%s\",\"device_id\":\"tof-01\",\"status\":\"%s\",\"error\":\"%s\"}",
+           ack.eventId, ack.status, ack.error);
+  int code = 0;
+  if (node.postJson("/api/v1/voice/ack", body, 700, &code)) {
+    Serial.printf("[voice] status acknowledged: event=%s status=%s HTTP %d\n",
+                  ack.eventId, ack.status, code);
+    ack.used = false;
+    voiceAckHead = static_cast<uint8_t>(
+        (voiceAckHead + 1) % (sizeof(voiceAckQueue) / sizeof(voiceAckQueue[0])));
+    --voiceAckCount;
+  } else {
+    Serial.printf("[voice] status POST deferred: event=%s status=%s HTTP %d\n",
+                  ack.eventId, ack.status, code);
+  }
+}
+
+void pollAudioPlaybackStatus() {
+  const safebath::PlaybackState before = audio.playbackState();
+  audio.poll();
+  if (!activeRemoteEventId[0] || before != safebath::PlaybackState::Playing) return;
+
+  const safebath::PlaybackState after = audio.playbackState();
+  if (after == safebath::PlaybackState::Completed) {
+    queueVoiceAck(activeRemoteEventId, "completed");
+    Serial.printf("[voice] DFPlayer reported completion for event=%s\n", activeRemoteEventId);
+    activeRemoteEventId[0] = '\0';
+  } else if (after == safebath::PlaybackState::Failed) {
+    queueVoiceAck(activeRemoteEventId, "failed", audio.lastError());
+    Serial.printf("[voice] DFPlayer playback failed for event=%s: %s\n",
+                  activeRemoteEventId, audio.lastError());
+    activeRemoteEventId[0] = '\0';
+  }
+}
+
+/* -------------------- Manual Serial Monitor speaker test -------------------- */
+void handleSerialCommand() {
+  serialCommand[serialCommandLength] = '\0';
+  if (serialCommandOverflow) {
+    Serial.println("[dfp] command too long; enter p1, p2, p3, or p4");
+  } else if (serialCommandLength == 2 && serialCommand[0] == 'p' &&
+             serialCommand[1] >= '1' && serialCommand[1] <= '4') {
+    const uint16_t promptNumber = static_cast<uint16_t>(serialCommand[1] - '0');
+    Serial.printf("[dfp] manual speaker test requested: /mp3/%04u.mp3\n",
+                  static_cast<unsigned>(promptNumber));
+    if (playVoicePrompt(promptNumber)) {
+      Serial.println("[dfp] playback command accepted; listen for the prompt and completion event");
+    } else {
+      Serial.printf("[dfp] manual playback failed: %s\n", audio.lastError());
+    }
+  } else if (serialCommandLength == 0) {
+    // Ignore a bare line ending, including the CRLF pair sent by many monitors.
+  } else if (serialCommandLength == 4 && memcmp(serialCommand, "help", 4) == 0) {
+    Serial.println("[dfp] commands: p1, p2, p3, p4 (press Enter); requires SD card online");
+  } else {
+    Serial.println("[dfp] unknown command; enter p1, p2, p3, or p4");
+  }
+  serialCommandLength = 0;
+  serialCommandOverflow = false;
+}
+
+void pollSerialCommand() {
+  // Bound serial work per loop so input cannot starve sensors or telemetry.
+  for (uint8_t count = 0; count < 16 && Serial.available() > 0; ++count) {
+    const char ch = static_cast<char>(Serial.read());
+    if (ch == '\r' || ch == '\n') {
+      handleSerialCommand();
+    } else if (ch == '\b' || ch == 0x7f) {
+      if (serialCommandLength > 0) --serialCommandLength;
+      serialCommandOverflow = false;
+    } else if (ch >= 0x20 && ch <= 0x7e) {
+      if (serialCommandLength < sizeof(serialCommand) - 1) {
+        serialCommand[serialCommandLength++] = ch;
+      } else {
+        serialCommandOverflow = true;
+      }
+    }
+  }
+}
+
 /* -------------------- Setup -------------------- */
 void setup() {
   Serial.begin(115200);
@@ -218,6 +355,7 @@ void setup() {
   // ToF, thermal, flow or HTTP telemetry operation.
   audio.begin(22);
 
+  Serial.println("[dfp] manual speaker test ready; type p1 and press Enter (p1-p4 allowed)");
   node.begin(ssid, password, server_host, server_port, node_token);
   Serial.println("[main] node ready.");
 }
@@ -228,30 +366,45 @@ void setup() {
 void pollVoicePrompt() {
   // Do not claim/consume a queued prompt until a card-online event confirms
   // that the player can receive it.
-  if (!audio.isReady()) return;
+  if (!audio.isReady() || audio.isPlaying()) return;
   String body = node.getJson("/api/v1/voice/pending?device_id=tof-01&role=play");
   if (body.length() == 0) return;
   String flat = body;
   flat.replace(" ", "");
   if (flat.indexOf("\"has_request\":true") < 0) return;
+  char eventId[40] = {};
+  if (!extractJsonString(flat, "event_id", eventId, sizeof(eventId))) {
+    Serial.println("[voice] command missing a valid event_id; playback skipped");
+    return;
+  }
+  queueVoiceAck(eventId, "received");
+  Serial.printf("[voice] command received: event=%s\n", eventId);
   const int promptKey = flat.indexOf("\"prompt\":\"");
   if (promptKey < 0) {
     Serial.println("[voice] ignored request without a prompt name");
+    queueVoiceAck(eventId, "failed", "missing_prompt");
     return;
   }
   const int valueStart = promptKey + 10;
   const int valueEnd = flat.indexOf('"', valueStart);
   if (valueEnd <= valueStart) {
     Serial.println("[voice] ignored malformed prompt name");
+    queueVoiceAck(eventId, "failed", "malformed_prompt");
     return;
   }
   const String promptName = flat.substring(valueStart, valueEnd);
   const uint16_t track = safebath::module5PromptTrack(promptName.c_str());
   if (!track) {
     Serial.println("[voice] ignored non-allowlisted prompt name");
+    queueVoiceAck(eventId, "failed", "invalid_prompt");
     return;
   }
-  playVoicePrompt(track);
+  if (playVoicePrompt(track)) {
+    strlcpy(activeRemoteEventId, eventId, sizeof(activeRemoteEventId));
+    queueVoiceAck(eventId, "started");
+  } else {
+    queueVoiceAck(eventId, "failed", audio.lastError());
+  }
 }
 
 /* -------------------- Loop -------------------- */
@@ -259,7 +412,8 @@ void loop() {
   static unsigned long lastVoicePoll = 0;
   static bool prevCollapse = false;
 
-  audio.poll();
+  pollAudioPlaybackStatus();
+  pollSerialCommand();
 
   float thermalFrame[64];
   amg.readPixels(thermalFrame);
@@ -318,6 +472,8 @@ void loop() {
     lastVoicePoll = millis();
     pollVoicePrompt();
   }
+
+  pollVoiceAcks();
 
   delay(300);
 }

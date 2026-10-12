@@ -131,6 +131,16 @@ class Node {
     return out;
   }
 
+  /* Bounded raw JSON POST for additive control/status APIs outside telemetry. */
+  bool postJson(const char* path, const char* body, unsigned long timeout_ms,
+                int* out_code = nullptr) {
+    int code = 0;
+    const bool ok = safebath::postJson(host_, port_, path, token_, body,
+                                       timeout_ms, code);
+    if (out_code) *out_code = code;
+    return ok;
+  }
+
   const char* deviceId() const { return device_id_; }
   const char* bootId() const { return boot_id_; }
 

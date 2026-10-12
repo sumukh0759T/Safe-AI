@@ -40,15 +40,50 @@ which selects from the root file index and does not mean the same thing.
 Prompt names are matched against a fixed allowlist in `Module5Prompt.h`;
 unknown text and track numbers outside 1–4 are ignored.
 
+## Manual speaker test
+
+After uploading this sketch, open Serial Monitor at **115200 baud**, select a
+line ending, and send `p1`. The firmware sends `playMp3Folder(1)` for
+`/mp3/0001.mp3` and prints whether the command was accepted, followed by the
+DFPlayer completion or error event when one is reported. `p2`, `p3`, and `p4`
+test the other allowlisted files. The test is manual and does not play on boot;
+it does not need the backend. The SD card must report online first. If it does
+not, the command reports `player_not_ready` while sensor and HTTP work continue.
+
+The startup banner identifies this source as **ToF/Thermal/Voice Node 5**, and
+this sketch contains the DFPlayer UART2 wiring and setup. The runtime device
+identity intentionally remains `tof-01` / `tof` for the existing backend
+contract. Those software logs identify the firmware configuration, but cannot
+prove which physical ESP32 was flashed; verify the Board 5 wiring (DFPlayer TX
+to GPIO16, ESP32 TX2 GPIO17 to DFPlayer RX) on the board under test.
+
 ## Backend command and authentication
 
 The firmware uses the existing
 `GET /api/v1/voice/pending?device_id=tof-01&role=play` queue. The response
-shape remains `{"has_request":true,"prompt":"are_you_ok",...}`. An existing
+shape remains additive to `{"has_request":true,"prompt":"are_you_ok",...}`
+and includes the `event_id` needed for acknowledgements. An existing
 confirmed/local event may enqueue `are_you_ok`; Gemini text is never parsed as
 a command. Player status is reported over serial (card, command sent,
 completion/error); it is not added to the telemetry contract and does not
 claim acoustic playback was physically verified.
+
+The dashboard's Remote speaker test uses the same voice-pending queue and the
+existing `SAFEBATH_VOICE_TEST_TOKEN` as a bearer token. It sends
+`POST /api/v1/voice/commands` with `{"device_id":"tof-01","prompt_id":1}`
+(IDs 1–4 only), then polls `GET /api/v1/voice/commands/{event_id}`. The API
+returns `202` with a queued event ID; status progresses through `queued`,
+`claimed`, `received`, `started`, then `completed` or `failed`. A stale queued
+command or a claimed command with no device acknowledgement becomes
+`timed_out`. The command queue targets only an enabled registered `tof` device.
+
+After the existing device claim, the ESP32 posts authenticated
+`POST /api/v1/voice/ack` JSON with `event_id`, `device_id`, and status
+(`received`, `started`, `completed`, or `failed`). A completion state means the
+DFPlayer emitted its track-finished event; the system has no microphone at the
+speaker output and cannot confirm audible sound remotely. The device claims a
+queued command once, so a lost response does not cause the same prompt to
+repeat on every poll; a manual retry queues a new command ID.
 
 When the registered `tof-01` device has a token in `SAFEBATH_DEVICES`, the
 existing route now checks the `X-Node-Token` header using the same per-device
@@ -61,9 +96,10 @@ For compatibility with existing development setups, a registered device with
 no configured token remains unauthenticated; do not expose that configuration
 to an untrusted network. Unknown/disabled device IDs receive HTTP 403.
 
-The legacy queue marks a request played when it is claimed, not when sound is
-measured. A command sent, a completion event, and sound heard from the
-intended speaker are different verification levels. If the player is not
+The existing device poll marks a request claimed before returning it, then
+device acknowledgements advance its playback status. A command sent, a
+completion event, and sound heard from the intended speaker are different
+verification levels. If the player is not
 reporting an SD card online, firmware leaves queued prompts unclaimed and
 continues sensor/network work. Reconnection attempts use a bounded backoff.
 

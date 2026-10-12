@@ -125,10 +125,9 @@ CREATE INDEX IF NOT EXISTS idx_notif_delivery_event ON notification_deliveries(e
 CREATE INDEX IF NOT EXISTS idx_notif_delivery_status ON notification_deliveries(status, next_attempt_at);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_notif_event_sub ON notification_deliveries(event_id, subscription_id);
 
--- Voice Bridge over HTTP: Board 5 tof event -> claimable request. Board 5
--- (speaker) claims it to PLAY a prompt (played_by); Board 4 (audio) claims it
--- with a lease to LISTEN and stores the reply back. The two claims are
--- independent so the original two-board fan-out survives without a broker.
+-- Voice Bridge over HTTP: Board 5 tof event or authorized dashboard command ->
+-- claimable request. Playback lifecycle is additive; Board 5 claims and reports
+-- received/started/completed/failed while Board 4 leases a listen and stores reply.
 CREATE TABLE IF NOT EXISTS voice_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id TEXT NOT NULL UNIQUE,
@@ -138,6 +137,11 @@ CREATE TABLE IF NOT EXISTS voice_requests (
     claimed_at REAL,
     played_by TEXT,
     played_at REAL,
+    source TEXT NOT NULL DEFAULT 'sensor',
+    target_device_id TEXT,
+    playback_status TEXT NOT NULL DEFAULT 'queued',
+    playback_error TEXT,
+    playback_updated_at REAL,
     reply TEXT,
     reply_ts REAL,
     expires_at REAL NOT NULL
@@ -190,6 +194,14 @@ def init_db(db_path: str = DEFAULT_DB) -> None:
         _ensure_column(conn, "alerts", "event_id", "TEXT")
         _ensure_column(conn, "voice_requests", "played_by", "TEXT")
         _ensure_column(conn, "voice_requests", "played_at", "REAL")
+        _ensure_column(conn, "voice_requests", "source", "TEXT NOT NULL DEFAULT 'sensor'")
+        _ensure_column(conn, "voice_requests", "target_device_id", "TEXT")
+        _ensure_column(conn, "voice_requests", "playback_status", "TEXT NOT NULL DEFAULT 'queued'")
+        _ensure_column(conn, "voice_requests", "playback_error", "TEXT")
+        _ensure_column(conn, "voice_requests", "playback_updated_at", "REAL")
+        conn.execute(
+            "UPDATE voice_requests SET playback_status='claimed' "
+            "WHERE played_by IS NOT NULL AND playback_status='queued'")
         conn.commit()
     finally:
         conn.close()

@@ -5,6 +5,13 @@ const API_BASE = resolveApiBase();
 const API_HEALTH = `${API_BASE}/api/v1/health`;
 const API_TURN = `${API_BASE}/api/v1/voice-test/turn`;
 const SESSION_DELETE = `${API_BASE}/api/v1/voice-test/`;
+const API_VOICE_COMMANDS = `${API_BASE}/api/v1/voice/commands`;
+const API_VOICE_PROMPTS = [
+  { id: 1, label: "1 · Check in — Are you okay?" },
+  { id: 2, label: "2 · Offer assistance" },
+  { id: 3, label: "3 · Emergency procedure reminder" },
+  { id: 4, label: "4 · Safety check" },
+];
 const EMERGENCY_WORDS = /\b(help|emergency|sos|drowning|can't breathe|cannot breathe|not breathing|bleeding|fell|fall|unconscious|chest pain)\b/i;
 
 function newSessionId() {
@@ -50,6 +57,10 @@ export default function VoiceTestApp({ embedded = false }) {
   const [microphoneStatus, setMicrophoneStatus] = useState("");
   const [draft, setDraft] = useState("");
   const [shareWithCaretaker, setShareWithCaretaker] = useState(true);
+  const [remotePromptId, setRemotePromptId] = useState(1);
+  const [remoteCommand, setRemoteCommand] = useState(null);
+  const [remoteError, setRemoteError] = useState("");
+  const [remoteSending, setRemoteSending] = useState(false);
   const recognitionRef = useRef(null);
   const activeRef = useRef(true);
   const intentionalStopRef = useRef(false);
@@ -69,11 +80,63 @@ export default function VoiceTestApp({ embedded = false }) {
     };
   }, []);
 
+  useEffect(() => {
+    if (!remoteCommand?.event_id || ["completed", "failed", "timed_out"].includes(remoteCommand.status)) return undefined;
+    let active = true;
+    const pollStatus = async () => {
+      try {
+        const response = await fetch(`${API_VOICE_COMMANDS}/${encodeURIComponent(remoteCommand.event_id)}`, {
+          headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+        });
+        if (!response.ok) throw new Error(errorForStatus(response.status));
+        const data = await response.json();
+        if (active) {
+          setRemoteCommand(data);
+          setRemoteError("");
+        }
+      } catch (err) {
+        if (active && err.name !== "AbortError") setRemoteError(err.message || "Could not read DFPlayer command status.");
+      }
+    };
+    void pollStatus();
+    const timer = setInterval(pollStatus, 1200);
+    return () => { active = false; clearInterval(timer); };
+  }, [remoteCommand?.event_id, remoteCommand?.status, token]);
+
   function addMessage(role, text, extra = {}) {
     setMessages((items) => [...items, {
       id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       role, text, ...extra,
     }]);
+  }
+
+  async function queueRemotePrompt() {
+    setRemoteError("");
+    if (!token.trim()) {
+      setRemoteError("Enter the voice-test bearer token before queueing a speaker test.");
+      return;
+    }
+    setRemoteSending(true);
+    setRemoteCommand(null);
+    try {
+      const response = await fetch(API_VOICE_COMMANDS, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+        },
+        body: JSON.stringify({ prompt_id: Number(remotePromptId), device_id: "tof-01" }),
+      });
+      if (!response.ok) throw new Error(errorForStatus(response.status));
+      setRemoteCommand(await response.json());
+    } catch (err) {
+      setRemoteError(err instanceof TypeError
+        ? `Could not reach ${API_BASE}. Check the network and backend status.`
+        : err.message || "Could not queue the DFPlayer command.");
+    } finally {
+      setRemoteSending(false);
+    }
   }
 
   async function testBackend() {
@@ -363,6 +426,37 @@ export default function VoiceTestApp({ embedded = false }) {
           <p style={styles.small}>The token stays in this page’s memory. Backend reachability does not validate the token; the first conversation request does.</p>
         </section>
 
+        <section aria-label="Remote DFPlayer test" style={styles.card}>
+          <div style={styles.sectionTop}>
+            <div><h2 style={styles.h2}>Remote speaker test</h2><p style={styles.small}>Queues one approved recording for registered ESP32 <code style={styles.code}>tof-01</code> over the existing HTTP voice queue.</p></div>
+          </div>
+          <div style={styles.connectRow}>
+            <select aria-label="Approved speaker prompt" value={remotePromptId} onChange={(event) => setRemotePromptId(Number(event.target.value))} style={styles.input}>
+              {API_VOICE_PROMPTS.map((prompt) => <option key={prompt.id} value={prompt.id}>{prompt.label}</option>)}
+            </select>
+            <button type="button" onClick={queueRemotePrompt} disabled={remoteSending || ["queued", "claimed", "received", "started"].includes(remoteCommand?.status)} style={styles.primaryButton}>
+              {remoteSending ? "Queueing…" : "Send to DFPlayer"}
+            </button>
+          </div>
+          <p style={styles.small}>Audio only. The command does not operate the relay, valve, door lock, or emergency alert.</p>
+          {remoteCommand && <div aria-live="polite" role="status" style={styles.commandStatus}>
+            <strong>{remoteCommand.status === "queued" ? "Waiting for device — command queued"
+              : remoteCommand.status === "claimed" ? "Device claimed command — waiting for receipt acknowledgement"
+                : remoteCommand.status === "received" ? "Command received by the ESP32"
+                  : remoteCommand.status === "started" ? "Playback started — DFPlayer accepted the play command"
+                    : remoteCommand.status === "completed" ? "Playback completed — DFPlayer reported its completion event"
+                      : remoteCommand.status === "failed" ? "Playback failed"
+                        : remoteCommand.status === "timed_out" ? (remoteCommand.device_online
+                          ? "Command timed out — no further playback acknowledgement arrived"
+                          : "Device offline or command timed out")
+                          : `Command status: ${remoteCommand.status}`}</strong>
+            <div style={styles.small}>Target: {remoteCommand.device_id || "tof-01"} · command {remoteCommand.event_id}</div>
+            {remoteCommand.status === "completed" && <div style={styles.small}>This confirms the DFPlayer completion event; the system does not independently measure sound at the speaker.</div>}
+            {remoteCommand.error && <div style={styles.warning}>Device error: {remoteCommand.error}</div>}
+          </div>}
+          {remoteError && <p role="alert" style={styles.error}>{remoteError}</p>}
+        </section>
+
         <section aria-label="Conversation controls" style={styles.card}>
           <div style={styles.sectionTop}>
             <div><h2 style={styles.h2}>Conversation</h2><p style={styles.small}>Session <code style={styles.code}>{sessionId.slice(0, 22)}…</code></p></div>
@@ -442,6 +536,7 @@ const styles = {
   interim: { margin: 0, color: "#acc3d6", fontStyle: "italic" },
   error: { margin: "14px 0 0", padding: 12, color: "#ffd3d3", background: "#4b2328", border: "1px solid #7b3d43", borderRadius: 10, lineHeight: 1.5 },
   warning: { color: "#f4d78a", margin: "12px 0", fontSize: 13 },
+  commandStatus: { marginTop: 14, padding: 12, border: "1px solid #41516a", borderRadius: 10, background: "#0b1524", lineHeight: 1.5 },
   emergency: { margin: "10px 0 0", color: "#ffe1a3", fontWeight: 700, lineHeight: 1.45 },
   emergencyBanner: { margin: "14px 0 0", padding: 13, color: "#fff0cc", background: "#594119", border: "1px solid #90713d", borderRadius: 10, lineHeight: 1.5, fontWeight: 650 },
   disclaimer: { padding: "15px 17px", borderRadius: 13, border: "1px solid #66522f", background: "#292516", color: "#e6d9b8", lineHeight: 1.55, fontSize: 13 },
